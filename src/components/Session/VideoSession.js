@@ -1,11 +1,12 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
-import { doc, getDoc, updateDoc } from 'firebase/firestore';
-import { db } from '../../config/firebase';
+import { doc, getDoc, updateDoc, onSnapshot, collection, addDoc, query, where, orderBy, limit } from 'firebase/firestore';
+import { ref, push, onValue, off } from 'firebase/database';
+import { db, realtimeDb } from '../../config/firebase';
 import { useAuth } from '../../hooks/useAuth';
 import SessionTimer from './SessionTimer';
 import SessionChat from './SessionChat';
-import { FiMic, FiMicOff, FiVideo, FiVideoOff, FiPhoneOff, FiMaximize2, FiMessageCircle, FiSettings } from 'react-icons/fi';
+import { FiMic, FiMicOff, FiVideo, FiVideoOff, FiPhoneOff, FiMaximize2, FiMessageCircle, FiSettings, FiMinimize2 } from 'react-icons/fi';
 import toast from 'react-hot-toast';
 
 function VideoSession() {
@@ -14,6 +15,7 @@ function VideoSession() {
   const navigate = useNavigate();
   const localVideoRef = useRef(null);
   const remoteVideoRef = useRef(null);
+  const peerConnectionRef = useRef(null);
   
   const [localStream, setLocalStream] = useState(null);
   const [remoteStream, setRemoteStream] = useState(null);
@@ -23,21 +25,36 @@ function VideoSession() {
   const [loading, setLoading] = useState(true);
   const [connectionStatus, setConnectionStatus] = useState('Initializing...');
   const [session, setSession] = useState(null);
-  const [isSidebarOpen, setIsSidebarOpen] = useState(true);
+  const [isSidebarOpen, setIsSidebarOpen] = useState(window.innerWidth > 1024);
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [mediaError, setMediaError] = useState(null);
+  const [partner, setPartner] = useState(null);
+  const [isInitiator, setIsInitiator] = useState(false);
+
+  // WebRTC configuration
+  const pcConfig = {
+    iceServers: [
+      { urls: 'stun:stun.l.google.com:19302' },
+      { urls: 'stun:stun1.l.google.com:19302' },
+      { urls: 'stun:stun2.l.google.com:19302' },
+      { urls: 'stun:stun3.l.google.com:19302' }
+    ]
+  };
 
   useEffect(() => {
     initializeSession();
     
+    // Handle window resize
+    const handleResize = () => {
+      setIsSidebarOpen(window.innerWidth > 1024);
+    };
+    
+    window.addEventListener('resize', handleResize);
+    
     // Cleanup function
     return () => {
-      if (localStream) {
-        localStream.getTracks().forEach(track => track.stop());
-      }
-      if (remoteStream) {
-        remoteStream.getTracks().forEach(track => track.stop());
-      }
+      window.removeEventListener('resize', handleResize);
+      cleanup();
     };
   }, []);
 
@@ -51,6 +68,22 @@ function VideoSession() {
     return () => document.removeEventListener('fullscreenchange', handleFullscreenChange);
   }, []);
 
+  const cleanup = () => {
+    if (localStream) {
+      localStream.getTracks().forEach(track => track.stop());
+    }
+    if (remoteStream) {
+      remoteStream.getTracks().forEach(track => track.stop());
+    }
+    if (peerConnectionRef.current) {
+      peerConnectionRef.current.close();
+    }
+    
+    // Clean up Firebase listeners
+    const signalRef = ref(realtimeDb, `sessions/${sessionId}/signals`);
+    off(signalRef);
+  };
+
   const initializeSession = async () => {
     try {
       setConnectionStatus('Loading session...');
@@ -61,6 +94,29 @@ function VideoSession() {
       
       if (sessionDoc.exists()) {
         sessionData = { id: sessionDoc.id, ...sessionDoc.data() };
+        setSession(sessionData);
+        
+        // Check if we're the initiator (creator of the session)
+        setIsInitiator(sessionData.userId === user?.uid);
+        
+        // Listen for session updates
+        const unsubscribe = onSnapshot(doc(db, 'sessions', sessionId), (doc) => {
+          if (doc.exists()) {
+            const updatedData = { id: doc.id, ...doc.data() };
+            setSession(updatedData);
+            if (updatedData.partnerId && updatedData.partnerId !== user?.uid) {
+              setPartner({
+                id: updatedData.partnerId,
+                name: updatedData.partnerName,
+                photo: updatedData.partnerPhoto
+              });
+            }
+          }
+        });
+        
+        // Find or wait for partner
+        await findOrWaitForPartner(sessionData);
+        
       } else {
         // Create demo session if not exists
         sessionData = {
@@ -70,18 +126,11 @@ function VideoSession() {
           userId: user?.uid || 'demo-user',
           status: 'active'
         };
+        setSession(sessionData);
       }
       
-      setSession(sessionData);
-      
-      // Initialize camera and microphone
+      // Initialize media
       await setupLocalStream();
-      
-      // Simulate partner connection for demo
-      setTimeout(() => {
-        setConnectionStatus('Connected');
-        simulatePartnerConnection();
-      }, 2000);
       
     } catch (error) {
       console.error('Error initializing session:', error);
@@ -89,6 +138,80 @@ function VideoSession() {
       toast.error('Error setting up session');
     }
     setLoading(false);
+  };
+
+  const findOrWaitForPartner = async (sessionData) => {
+    try {
+      // If session already has a partner, set up connection
+      if (sessionData.partnerId && sessionData.partnerId !== user?.uid) {
+        setPartner({
+          id: sessionData.partnerId,
+          name: sessionData.partnerName,
+          photo: sessionData.partnerPhoto
+        });
+        setConnectionStatus('Connecting to partner...');
+        await setupWebRTCConnection();
+        return;
+      }
+
+      // If no partner, try to find one
+      const partnerQuery = query(
+        collection(db, 'sessions'),
+        where('startTime', '==', sessionData.startTime),
+        where('duration', '==', sessionData.duration),
+        where('status', '==', 'scheduled'),
+        where('userId', '!=', user.uid),
+        orderBy('createdAt', 'asc'),
+        limit(1)
+      );
+
+      // Listen for potential partners
+      const unsubscribe = onSnapshot(partnerQuery, async (snapshot) => {
+        if (!snapshot.empty) {
+          const partnerSession = snapshot.docs[0];
+          const partnerData = partnerSession.data();
+          
+          // Update both sessions with partner info
+          await Promise.all([
+            updateDoc(doc(db, 'sessions', sessionId), {
+              partnerId: partnerData.userId,
+              partnerName: partnerData.userName,
+              partnerPhoto: partnerData.userPhoto,
+              status: 'active'
+            }),
+            updateDoc(doc(db, 'sessions', partnerSession.id), {
+              partnerId: user.uid,
+              partnerName: user.displayName,
+              partnerPhoto: user.photoURL,
+              status: 'active'
+            })
+          ]);
+
+          setPartner({
+            id: partnerData.userId,
+            name: partnerData.userName,
+            photo: partnerData.userPhoto
+          });
+
+          toast.success(`Connected with ${partnerData.userName}! 🤝`);
+          setConnectionStatus('Connecting to partner...');
+          await setupWebRTCConnection();
+          unsubscribe();
+        }
+      });
+
+      // Update session status to active and add user info
+      await updateDoc(doc(db, 'sessions', sessionId), {
+        status: 'active',
+        startedAt: new Date(),
+        userName: user.displayName,
+        userPhoto: user.photoURL
+      });
+
+    } catch (error) {
+      console.error('Error finding partner:', error);
+      setConnectionStatus('Failed to find partner');
+    }
   };
 
   const setupLocalStream = async () => {
@@ -117,66 +240,165 @@ function VideoSession() {
         localVideoRef.current.srcObject = stream;
       }
       
-      setConnectionStatus('Waiting for partner...');
+      setConnectionStatus('Media ready');
       setMediaError(null);
-      
-      // Update session status to active
-      if (sessionId && sessionId !== 'demo') {
-        await updateDoc(doc(db, 'sessions', sessionId), {
-          status: 'active',
-          startedAt: new Date()
-        });
-      }
       
     } catch (error) {
       console.error('Media access error:', error);
       setMediaError('Camera/microphone access denied. Please allow access and refresh.');
       setConnectionStatus('Media access failed');
-      
-      // Fallback to demo mode without actual camera
-      toast.error('Camera access denied. Running in demo mode.');
+      toast.error('Camera access denied. Please enable camera and microphone access.');
     }
   };
 
-  const simulatePartnerConnection = () => {
-    // In a real app, this would be the remote stream from WebRTC
-    // For demo, we'll create a mock partner video
+  const setupWebRTCConnection = async () => {
     try {
-      const canvas = document.createElement('canvas');
-      canvas.width = 640;
-      canvas.height = 480;
-      const ctx = canvas.getContext('2d');
+      // Create peer connection
+      peerConnectionRef.current = new RTCPeerConnection(pcConfig);
       
-      // Create a gradient background
-      const gradient = ctx.createLinearGradient(0, 0, canvas.width, canvas.height);
-      gradient.addColorStop(0, '#667eea');
-      gradient.addColorStop(1, '#764ba2');
-      
-      const drawFrame = () => {
-        ctx.fillStyle = gradient;
-        ctx.fillRect(0, 0, canvas.width, canvas.height);
-        
-        // Add some animation
-        ctx.fillStyle = 'white';
-        ctx.font = '24px Arial';
-        ctx.textAlign = 'center';
-        ctx.fillText('Partner Connected', canvas.width / 2, canvas.height / 2);
-        ctx.fillText('🤝', canvas.width / 2, canvas.height / 2 + 40);
-        
-        requestAnimationFrame(drawFrame);
-      };
-      
-      drawFrame();
-      
-      const mockStream = canvas.captureStream(30);
-      setRemoteStream(mockStream);
-      
-      if (remoteVideoRef.current) {
-        remoteVideoRef.current.srcObject = mockStream;
+      // Add local stream to peer connection
+      if (localStream) {
+        localStream.getTracks().forEach(track => {
+          peerConnectionRef.current.addTrack(track, localStream);
+        });
       }
-      
+
+      // Handle remote stream
+      peerConnectionRef.current.ontrack = (event) => {
+        console.log('Received remote stream');
+        const [remoteStream] = event.streams;
+        setRemoteStream(remoteStream);
+        if (remoteVideoRef.current) {
+          remoteVideoRef.current.srcObject = remoteStream;
+        }
+        setConnectionStatus('Connected');
+      };
+
+      // Handle ICE candidates
+      peerConnectionRef.current.onicecandidate = (event) => {
+        if (event.candidate) {
+          sendSignal({
+            type: 'ice-candidate',
+            candidate: event.candidate,
+            from: user.uid
+          });
+        }
+      };
+
+      // Handle connection state changes
+      peerConnectionRef.current.onconnectionstatechange = () => {
+        const state = peerConnectionRef.current.connectionState;
+        console.log('Connection state:', state);
+        
+        switch (state) {
+          case 'connected':
+            setConnectionStatus('Connected');
+            break;
+          case 'disconnected':
+            setConnectionStatus('Disconnected');
+            break;
+          case 'failed':
+            setConnectionStatus('Connection failed');
+            break;
+          case 'connecting':
+            setConnectionStatus('Connecting...');
+            break;
+          default:
+            break;
+        }
+      };
+
+      // Listen for signaling data
+      listenForSignals();
+
+      // If we're the initiator, create offer
+      if (isInitiator) {
+        console.log('Creating offer as initiator');
+        const offer = await peerConnectionRef.current.createOffer();
+        await peerConnectionRef.current.setLocalDescription(offer);
+        
+        sendSignal({
+          type: 'offer',
+          offer: offer,
+          from: user.uid
+        });
+      }
+
     } catch (error) {
-      console.error('Error creating mock partner stream:', error);
+      console.error('Error setting up WebRTC:', error);
+      setConnectionStatus('Connection failed');
+    }
+  };
+
+  const sendSignal = async (data) => {
+    try {
+      const signalRef = ref(realtimeDb, `sessions/${sessionId}/signals`);
+      await push(signalRef, {
+        ...data,
+        timestamp: Date.now()
+      });
+    } catch (error) {
+      console.error('Error sending signal:', error);
+    }
+  };
+
+  const listenForSignals = () => {
+    const signalRef = ref(realtimeDb, `sessions/${sessionId}/signals`);
+    
+    onValue(signalRef, async (snapshot) => {
+      const signals = snapshot.val();
+      if (signals) {
+        const signalEntries = Object.entries(signals);
+        const latestSignals = signalEntries
+          .sort((a, b) => b[1].timestamp - a[1].timestamp)
+          .slice(0, 10); // Process only recent signals
+
+        for (const [key, signal] of latestSignals) {
+          if (signal.from !== user.uid) {
+            try {
+              await handleSignal(signal);
+            } catch (error) {
+              console.error('Error handling signal:', error);
+            }
+          }
+        }
+      }
+    });
+  };
+
+  const handleSignal = async (signal) => {
+    if (!peerConnectionRef.current) return;
+
+    try {
+      switch (signal.type) {
+        case 'offer':
+          console.log('Received offer');
+          await peerConnectionRef.current.setRemoteDescription(new RTCSessionDescription(signal.offer));
+          const answer = await peerConnectionRef.current.createAnswer();
+          await peerConnectionRef.current.setLocalDescription(answer);
+          
+          sendSignal({
+            type: 'answer',
+            answer: answer,
+            from: user.uid
+          });
+          break;
+
+        case 'answer':
+          console.log('Received answer');
+          await peerConnectionRef.current.setRemoteDescription(new RTCSessionDescription(signal.answer));
+          break;
+
+        case 'ice-candidate':
+          console.log('Received ICE candidate');
+          await peerConnectionRef.current.addIceCandidate(new RTCIceCandidate(signal.candidate));
+          break;
+
+        default:
+          console.log('Unknown signal type:', signal.type);
+      }
+    } catch (error) {
+      console.error('Error handling signal:', error);
     }
   };
 
@@ -216,13 +438,7 @@ function VideoSession() {
   const endSession = async () => {
     if (window.confirm('Are you sure you want to end this session?')) {
       try {
-        // Stop all media tracks
-        if (localStream) {
-          localStream.getTracks().forEach(track => track.stop());
-        }
-        if (remoteStream) {
-          remoteStream.getTracks().forEach(track => track.stop());
-        }
+        cleanup();
 
         // Update session status
         if (sessionId && sessionId !== 'demo') {
@@ -245,6 +461,10 @@ function VideoSession() {
   const onTimerComplete = () => {
     toast.success('Session time completed!');
     endSession();
+  };
+
+  const toggleSidebar = () => {
+    setIsSidebarOpen(!isSidebarOpen);
   };
 
   if (loading) {
@@ -282,6 +502,16 @@ function VideoSession() {
   return (
     <div className={`video-session-page ${isFullscreen ? 'fullscreen' : ''}`}>
       <div className="video-container">
+        <div className="video-header mobile-only">
+          <div className="session-info-mobile">
+            <h3>{session?.goal || 'Focus Session'}</h3>
+            <span className="connection-status">{connectionStatus}</span>
+          </div>
+          <button className="sidebar-toggle-mobile" onClick={toggleSidebar}>
+            <FiMessageCircle size={20} />
+          </button>
+        </div>
+
         <div className="videos-grid">
           {/* Local Video */}
           <div className="video-box local-video">
@@ -316,7 +546,9 @@ function VideoSession() {
               playsInline
               className="video-stream"
             />
-            <div className="video-label">Partner</div>
+            <div className="video-label">
+              {partner ? partner.name : 'Partner'}
+            </div>
             {connectionStatus !== 'Connected' ? (
               <div className="video-connecting">
                 <div className="pulse-loader"></div>
@@ -324,7 +556,9 @@ function VideoSession() {
               </div>
             ) : !remoteStream ? (
               <div className="video-disabled">
-                <div className="disabled-avatar">P</div>
+                <div className="disabled-avatar">
+                  {partner?.name?.charAt(0).toUpperCase() || 'P'}
+                </div>
                 <p>Partner's camera off</p>
               </div>
             ) : null}
@@ -358,16 +592,16 @@ function VideoSession() {
           </button>
 
           <button
-            className="control-button"
+            className="control-button desktop-only"
             onClick={toggleFullscreen}
             title={isFullscreen ? 'Exit fullscreen' : 'Enter fullscreen'}
           >
-            <FiMaximize2 size={20} />
+            {isFullscreen ? <FiMinimize2 size={20} /> : <FiMaximize2 size={20} />}
           </button>
 
           <button
-            className="control-button mobile-sidebar-toggle"
-            onClick={() => setIsSidebarOpen(!isSidebarOpen)}
+            className="control-button desktop-only"
+            onClick={toggleSidebar}
             title="Toggle sidebar"
           >
             <FiMessageCircle size={20} />
@@ -377,24 +611,34 @@ function VideoSession() {
 
       {/* Sidebar */}
       <div className={`session-sidebar ${isSidebarOpen ? 'open' : ''}`}>
+        <div className="sidebar-header mobile-only">
+          <h3>Session Controls</h3>
+          <button className="close-sidebar" onClick={toggleSidebar}>
+            ×
+          </button>
+        </div>
+
         <div className="sidebar-tabs">
           <button
             className={`tab-button ${activeTab === 'timer' ? 'active' : ''}`}
             onClick={() => setActiveTab('timer')}
           >
-            Timer
+            <span className="tab-icon">⏱️</span>
+            <span className="tab-text">Timer</span>
           </button>
           <button
             className={`tab-button ${activeTab === 'chat' ? 'active' : ''}`}
             onClick={() => setActiveTab('chat')}
           >
-            Chat
+            <span className="tab-icon">💬</span>
+            <span className="tab-text">Chat</span>
           </button>
           <button
             className={`tab-button ${activeTab === 'goals' ? 'active' : ''}`}
             onClick={() => setActiveTab('goals')}
           >
-            Goals
+            <span className="tab-icon">🎯</span>
+            <span className="tab-text">Goals</span>
           </button>
         </div>
 
@@ -404,6 +648,7 @@ function VideoSession() {
               <SessionTimer 
                 duration={session?.duration || 50} 
                 onComplete={onTimerComplete}
+                sessionId={sessionId}
               />
               <div className="session-info">
                 <h4>Session Details</h4>
@@ -413,8 +658,16 @@ function VideoSession() {
                 </div>
                 <div className="info-item">
                   <span>Status:</span>
-                  <span className="status active">Active</span>
+                  <span className={`status ${connectionStatus.toLowerCase().replace(' ', '-')}`}>
+                    {connectionStatus}
+                  </span>
                 </div>
+                {partner && (
+                  <div className="info-item">
+                    <span>Partner:</span>
+                    <span>{partner.name}</span>
+                  </div>
+                )}
               </div>
             </div>
           )}
@@ -441,7 +694,7 @@ function VideoSession() {
                 <textarea
                   className="notes-textarea"
                   placeholder="Track your progress, ideas, and accomplishments here..."
-                  rows={8}
+                  rows={6}
                 />
                 <button className="save-button">
                   <FiSettings size={16} />
@@ -453,10 +706,12 @@ function VideoSession() {
         </div>
         
         {/* Mobile sidebar overlay */}
-        <div 
-          className="sidebar-overlay"
-          onClick={() => setIsSidebarOpen(false)}
-        />
+        {isSidebarOpen && (
+          <div 
+            className="sidebar-overlay mobile-only"
+            onClick={toggleSidebar}
+          />
+        )}
       </div>
     </div>
   );

@@ -6,7 +6,7 @@ import { useAuth } from '../../hooks/useAuth';
 import SessionCard from './SessionCard';
 import Stats from './Stats';
 import { CSSLoadingSpinner, SkeletonLoader } from '../Common/LoadingSpinner';
-import { FiPlus, FiCalendar, FiUsers, FiClock, FiTrendingUp, FiRefreshCw } from 'react-icons/fi';
+import { FiPlus, FiCalendar, FiUsers, FiClock, FiTrendingUp, FiRefreshCw, FiMic, FiVideo } from 'react-icons/fi';
 import { format, isToday, isTomorrow, isYesterday } from 'date-fns';
 import toast from 'react-hot-toast';
 
@@ -25,6 +25,16 @@ function Dashboard() {
   const [refreshing, setRefreshing] = useState(false);
   const [activeTab, setActiveTab] = useState('upcoming');
   const [error, setError] = useState(null);
+  const [isMobile, setIsMobile] = useState(window.innerWidth < 768);
+
+  useEffect(() => {
+    const handleResize = () => {
+      setIsMobile(window.innerWidth < 768);
+    };
+
+    window.addEventListener('resize', handleResize);
+    return () => window.removeEventListener('resize', handleResize);
+  }, []);
 
   useEffect(() => {
     fetchUserData();
@@ -222,19 +232,52 @@ function Dashboard() {
     return {
       session: nextSession,
       timeString,
-      isUpcoming: timeDiff > 0
+      isUpcoming: timeDiff > 0,
+      canJoinEarly: timeDiff < 15 * 60 * 1000 // Can join 15 minutes early
     };
   };
+
+  const handleJoinSession = (sessionId) => {
+    navigate(`/session/${sessionId}`);
+  };
+
+  const quickActions = [
+    {
+      icon: FiCalendar,
+      label: 'Book Session',
+      action: () => navigate('/book-session'),
+      color: 'primary'
+    },
+    {
+      icon: FiUsers,
+      label: 'Favorites',
+      action: () => navigate('/favorites'),
+      color: 'secondary'
+    },
+    {
+      icon: FiTrendingUp,
+      label: 'Stats',
+      action: () => navigate('/profile'),
+      color: 'success'
+    }
+  ];
 
   if (loading) {
     return (
       <div className="dashboard">
-        <div className="dashboard-header">
-          <SkeletonLoader lines={2} />
-        </div>
         <div className="dashboard-loading">
-          <SkeletonLoader lines={4} />
-          <SkeletonLoader lines={4} />
+          <div className="header-skeleton">
+            <SkeletonLoader lines={2} />
+          </div>
+          <div className="stats-skeleton">
+            {[1, 2, 3, 4].map(i => (
+              <SkeletonLoader key={i} lines={2} />
+            ))}
+          </div>
+          <div className="content-skeleton">
+            <SkeletonLoader lines={4} />
+            <SkeletonLoader lines={4} />
+          </div>
         </div>
       </div>
     );
@@ -274,15 +317,17 @@ function Dashboard() {
               onClick={handleRefresh}
               disabled={refreshing}
               title="Refresh data"
+              aria-label="Refresh dashboard data"
             >
               <FiRefreshCw size={16} className={refreshing ? 'spinning' : ''} />
             </button>
+            
             <button 
-              className="btn-primary"
+              className="btn-primary book-session-btn"
               onClick={() => navigate('/book-session')}
             >
               <FiPlus size={16} />
-              <span className="btn-text">Book Session</span>
+              <span className="btn-text">{isMobile ? 'Book' : 'Book Session'}</span>
             </button>
           </div>
         </div>
@@ -296,12 +341,15 @@ function Dashboard() {
                 <strong>Next session starts {nextSessionInfo.timeString}</strong>
                 <span>"{nextSessionInfo.session.goal}"</span>
               </div>
-              <button 
-                className="join-button"
-                onClick={() => navigate(`/session/${nextSessionInfo.session.id}`)}
-              >
-                Join Early
-              </button>
+              {nextSessionInfo.canJoinEarly && (
+                <button 
+                  className="join-button"
+                  onClick={() => handleJoinSession(nextSessionInfo.session.id)}
+                >
+                  <FiVideo size={14} />
+                  Join
+                </button>
+              )}
             </div>
           </div>
         )}
@@ -320,14 +368,20 @@ function Dashboard() {
               onClick={() => setActiveTab('upcoming')}
             >
               <FiCalendar size={16} />
-              <span>Upcoming ({upcomingSessions.length})</span>
+              <span>Upcoming</span>
+              {upcomingSessions.length > 0 && (
+                <span className="tab-badge">{upcomingSessions.length}</span>
+              )}
             </button>
             <button 
               className={`tab-button ${activeTab === 'completed' ? 'active' : ''}`}
               onClick={() => setActiveTab('completed')}
             >
               <FiClock size={16} />
-              <span>Completed ({completedSessions.length})</span>
+              <span>Completed</span>
+              {completedSessions.length > 0 && (
+                <span className="tab-badge">{completedSessions.length}</span>
+              )}
             </button>
           </div>
         </div>
@@ -340,8 +394,9 @@ function Dashboard() {
                   <SessionCard 
                     key={session.id} 
                     session={session} 
-                    onJoin={() => navigate(`/session/${session.id}`)}
+                    onJoin={() => handleJoinSession(session.id)}
                     showJoinButton={true}
+                    isMobile={isMobile}
                   />
                 ))}
               </div>
@@ -367,6 +422,7 @@ function Dashboard() {
                     key={session.id} 
                     session={session} 
                     completed={true}
+                    isMobile={isMobile}
                   />
                 ))}
               </div>
@@ -392,29 +448,41 @@ function Dashboard() {
       <div className="quick-actions">
         <h3>Quick Actions</h3>
         <div className="actions-grid">
-          <button 
-            className="action-card"
-            onClick={() => navigate('/book-session')}
-          >
-            <FiCalendar size={24} />
-            <span>Book Session</span>
-          </button>
-          <button 
-            className="action-card"
-            onClick={() => navigate('/favorites')}
-          >
-            <FiUsers size={24} />
-            <span>My Favorites</span>
-          </button>
-          <button 
-            className="action-card"
-            onClick={() => navigate('/profile')}
-          >
-            <FiTrendingUp size={24} />
-            <span>View Stats</span>
-          </button>
+          {quickActions.map((action, index) => (
+            <button 
+              key={index}
+              className={`action-card ${action.color}`}
+              onClick={action.action}
+            >
+              <action.icon size={isMobile ? 20 : 24} />
+              <span>{action.label}</span>
+            </button>
+          ))}
         </div>
       </div>
+
+      {/* Recent Activity (Mobile Only) */}
+      {isMobile && completedSessions.length > 0 && (
+        <div className="recent-activity mobile-only">
+          <h3>Recent Activity</h3>
+          <div className="activity-list">
+            {completedSessions.slice(0, 3).map(session => (
+              <div key={session.id} className="activity-item">
+                <div className="activity-icon">✅</div>
+                <div className="activity-content">
+                  <p className="activity-title">Completed focus session</p>
+                  <p className="activity-time">
+                    {format(new Date(session.endTime || session.completedAt), 'MMM d, h:mm a')}
+                  </p>
+                </div>
+                <div className="activity-duration">
+                  {session.duration}min
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
     </div>
   );
 }

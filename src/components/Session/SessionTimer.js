@@ -1,16 +1,71 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { FiPlay, FiPause, FiRotateCcw, FiVolume2, FiVolumeX } from 'react-icons/fi';
 
-function SessionTimer({ duration = 50, onComplete, autoStart = true, showControls = true }) {
-  const [timeLeft, setTimeLeft] = useState(duration * 60);
-  const [isRunning, setIsRunning] = useState(autoStart);
-  const [isCompleted, setIsCompleted] = useState(false);
+function SessionTimer({ duration = 50, onComplete, autoStart = true, showControls = true, sessionId }) {
+  // Use refs to persist timer state across re-renders and tab switches
+  const timerStateRef = useRef({
+    timeLeft: duration * 60,
+    isRunning: autoStart,
+    isCompleted: false,
+    startTime: Date.now(),
+    totalElapsed: 0
+  });
+
+  const [timeLeft, setTimeLeft] = useState(timerStateRef.current.timeLeft);
+  const [isRunning, setIsRunning] = useState(timerStateRef.current.isRunning);
+  const [isCompleted, setIsCompleted] = useState(timerStateRef.current.isCompleted);
   const [soundEnabled, setSoundEnabled] = useState(true);
+  
   const intervalRef = useRef(null);
   const audioRef = useRef(null);
   const totalSeconds = duration * 60;
 
+  // Persist timer state in localStorage
+  const saveTimerState = useCallback(() => {
+    if (sessionId) {
+      const state = {
+        ...timerStateRef.current,
+        lastUpdate: Date.now()
+      };
+      localStorage.setItem(`timer_${sessionId}`, JSON.stringify(state));
+    }
+  }, [sessionId]);
+
+  const loadTimerState = useCallback(() => {
+    if (sessionId) {
+      const saved = localStorage.getItem(`timer_${sessionId}`);
+      if (saved) {
+        try {
+          const state = JSON.parse(saved);
+          const timeSinceLastUpdate = Date.now() - state.lastUpdate;
+          
+          if (state.isRunning && !state.isCompleted) {
+            // Calculate how much time has passed since last update
+            const secondsElapsed = Math.floor(timeSinceLastUpdate / 1000);
+            const newTimeLeft = Math.max(0, state.timeLeft - secondsElapsed);
+            
+            timerStateRef.current = {
+              ...state,
+              timeLeft: newTimeLeft,
+              isCompleted: newTimeLeft <= 0
+            };
+          } else {
+            timerStateRef.current = state;
+          }
+          
+          setTimeLeft(timerStateRef.current.timeLeft);
+          setIsRunning(timerStateRef.current.isRunning);
+          setIsCompleted(timerStateRef.current.isCompleted);
+        } catch (error) {
+          console.error('Error loading timer state:', error);
+        }
+      }
+    }
+  }, [sessionId]);
+
   useEffect(() => {
+    loadTimerState();
+    
     // Initialize audio for notifications
     audioRef.current = new Audio();
     
@@ -18,8 +73,9 @@ function SessionTimer({ duration = 50, onComplete, autoStart = true, showControl
       if (intervalRef.current) {
         clearInterval(intervalRef.current);
       }
+      saveTimerState();
     };
-  }, []);
+  }, [loadTimerState, saveTimerState]);
 
   useEffect(() => {
     if (isRunning && timeLeft > 0 && !isCompleted) {
@@ -27,21 +83,42 @@ function SessionTimer({ duration = 50, onComplete, autoStart = true, showControl
         setTimeLeft(prevTime => {
           const newTime = prevTime - 1;
           
+          // Update ref state
+          timerStateRef.current.timeLeft = newTime;
+          
           // Play sound notifications at key intervals
           if (soundEnabled && (newTime === 300 || newTime === 60 || newTime === 30)) {
             playNotificationSound();
           }
           
           if (newTime <= 0) {
+            timerStateRef.current.isCompleted = true;
+            timerStateRef.current.isRunning = false;
             setIsCompleted(true);
             setIsRunning(false);
+            
             if (soundEnabled) {
               playCompletionSound();
             }
+            
+            // Clear saved state when completed
+            if (sessionId) {
+              localStorage.removeItem(`timer_${sessionId}`);
+            }
+            
             if (onComplete) {
               setTimeout(() => onComplete(), 1000);
             }
             return 0;
+          }
+          
+          // Save state periodically
+          if (newTime % 10 === 0) {
+            timerStateRef.current.lastUpdate = Date.now();
+            if (sessionId) {
+              const state = { ...timerStateRef.current };
+              localStorage.setItem(`timer_${sessionId}`, JSON.stringify(state));
+            }
           }
           
           return newTime;
@@ -59,11 +136,23 @@ function SessionTimer({ duration = 50, onComplete, autoStart = true, showControl
         clearInterval(intervalRef.current);
       }
     };
-  }, [isRunning, timeLeft, isCompleted, onComplete, soundEnabled]);
+  }, [isRunning, timeLeft, isCompleted, onComplete, soundEnabled, sessionId]);
+
+  // Save state when component unmounts or page unloads
+  useEffect(() => {
+    const handleBeforeUnload = () => {
+      saveTimerState();
+    };
+
+    window.addEventListener('beforeunload', handleBeforeUnload);
+    return () => {
+      window.removeEventListener('beforeunload', handleBeforeUnload);
+      saveTimerState();
+    };
+  }, [saveTimerState]);
 
   const playNotificationSound = () => {
     try {
-      // Create a simple beep sound using Web Audio API
       const audioContext = new (window.AudioContext || window.webkitAudioContext)();
       const oscillator = audioContext.createOscillator();
       const gainNode = audioContext.createGain();
@@ -86,7 +175,6 @@ function SessionTimer({ duration = 50, onComplete, autoStart = true, showControl
 
   const playCompletionSound = () => {
     try {
-      // Play a completion melody
       const audioContext = new (window.AudioContext || window.webkitAudioContext)();
       const notes = [523.25, 659.25, 783.99]; // C, E, G
       
@@ -131,13 +219,32 @@ function SessionTimer({ duration = 50, onComplete, autoStart = true, showControl
 
   const toggleTimer = () => {
     if (isCompleted) return;
-    setIsRunning(!isRunning);
+    
+    const newRunningState = !isRunning;
+    timerStateRef.current.isRunning = newRunningState;
+    timerStateRef.current.lastUpdate = Date.now();
+    
+    setIsRunning(newRunningState);
+    saveTimerState();
   };
 
   const resetTimer = () => {
+    timerStateRef.current = {
+      timeLeft: totalSeconds,
+      isRunning: autoStart,
+      isCompleted: false,
+      startTime: Date.now(),
+      totalElapsed: 0
+    };
+    
     setTimeLeft(totalSeconds);
     setIsRunning(autoStart);
     setIsCompleted(false);
+    
+    // Clear saved state
+    if (sessionId) {
+      localStorage.removeItem(`timer_${sessionId}`);
+    }
   };
 
   const toggleSound = () => {
