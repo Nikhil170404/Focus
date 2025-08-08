@@ -17,6 +17,7 @@ function Header() {
       await signOut(auth);
       toast.success('Logged out successfully');
       navigate('/login');
+      setMobileMenuOpen(false);
     } catch (error) {
       toast.error('Error logging out');
     }
@@ -24,64 +25,141 @@ function Header() {
 
   const isActive = (path) => location.pathname === path;
 
+  const closeMobileMenu = () => setMobileMenuOpen(false);
+
   return (
-    <header className="header">
+    <header className="compact-header">
       <div className="header-content">
-        <Link to="/" className="logo">
-          <span>🎯</span>
-          FocusMate India
+        <Link to="/" className="compact-logo" onClick={closeMobileMenu}>
+          <span className="logo-icon">🎯</span>
+          <span className="logo-text">FocusMate</span>
         </Link>
         
         {user && (
           <>
-            <nav className={`nav-menu ${mobileMenuOpen ? 'mobile-open' : ''}`}>
+            {/* Desktop Navigation */}
+            <nav className="desktop-nav">
               <Link
                 to="/dashboard"
                 className={`nav-link ${isActive('/dashboard') ? 'active' : ''}`}
-                onClick={() => setMobileMenuOpen(false)}
               >
-                <FiHome /> Dashboard
+                <FiHome size={18} />
+                <span>Dashboard</span>
               </Link>
               <Link
                 to="/book-session"
                 className={`nav-link ${isActive('/book-session') ? 'active' : ''}`}
-                onClick={() => setMobileMenuOpen(false)}
               >
-                <FiCalendar /> Book Session
+                <FiCalendar size={18} />
+                <span>Book</span>
               </Link>
               <Link
                 to="/favorites"
                 className={`nav-link ${isActive('/favorites') ? 'active' : ''}`}
-                onClick={() => setMobileMenuOpen(false)}
               >
-                <FiHeart /> Favorites
+                <FiHeart size={18} />
+                <span>Favorites</span>
               </Link>
               <Link
                 to="/profile"
                 className={`nav-link ${isActive('/profile') ? 'active' : ''}`}
-                onClick={() => setMobileMenuOpen(false)}
               >
-                <FiUser /> Profile
+                <FiUser size={18} />
+                <span>Profile</span>
               </Link>
             </nav>
             
-            <div className="user-info">
+            {/* User Section */}
+            <div className="user-section">
               <div className="user-avatar">
                 {user.photoURL ? (
                   <img src={user.photoURL} alt={user.displayName} />
                 ) : (
-                  user.displayName?.charAt(0).toUpperCase() || user.email?.charAt(0).toUpperCase()
+                  <span className="avatar-text">
+                    {user.displayName?.charAt(0).toUpperCase() || user.email?.charAt(0).toUpperCase()}
+                  </span>
                 )}
               </div>
-              <button className="logout-btn" onClick={handleLogout}>
-                <FiLogOut />
+              
+              {/* Desktop Logout */}
+              <button className="logout-btn desktop-only" onClick={handleLogout} title="Logout">
+                <FiLogOut size={18} />
               </button>
+              
+              {/* Mobile Menu Toggle */}
               <button
-                className="mobile-menu-toggle"
+                className="mobile-menu-btn"
                 onClick={() => setMobileMenuOpen(!mobileMenuOpen)}
+                aria-label="Toggle menu"
               >
-                {mobileMenuOpen ? <FiX /> : <FiMenu />}
+                {mobileMenuOpen ? <FiX size={20} /> : <FiMenu size={20} />}
               </button>
+            </div>
+            
+            {/* Mobile Navigation */}
+            <div className={`mobile-nav ${mobileMenuOpen ? 'open' : ''}`}>
+              <div className="mobile-nav-content">
+                <div className="mobile-user-info">
+                  <div className="mobile-avatar">
+                    {user.photoURL ? (
+                      <img src={user.photoURL} alt={user.displayName} />
+                    ) : (
+                      <span className="avatar-text">
+                        {user.displayName?.charAt(0).toUpperCase() || user.email?.charAt(0).toUpperCase()}
+                      </span>
+                    )}
+                  </div>
+                  <div className="mobile-user-details">
+                    <p className="user-name">{user.displayName || 'Focus Warrior'}</p>
+                    <p className="user-email">{user.email}</p>
+                  </div>
+                </div>
+                
+                <nav className="mobile-nav-links">
+                  <Link
+                    to="/dashboard"
+                    className={`mobile-nav-link ${isActive('/dashboard') ? 'active' : ''}`}
+                    onClick={closeMobileMenu}
+                  >
+                    <FiHome size={20} />
+                    <span>Dashboard</span>
+                  </Link>
+                  <Link
+                    to="/book-session"
+                    className={`mobile-nav-link ${isActive('/book-session') ? 'active' : ''}`}
+                    onClick={closeMobileMenu}
+                  >
+                    <FiCalendar size={20} />
+                    <span>Book Session</span>
+                  </Link>
+                  <Link
+                    to="/favorites"
+                    className={`mobile-nav-link ${isActive('/favorites') ? 'active' : ''}`}
+                    onClick={closeMobileMenu}
+                  >
+                    <FiHeart size={20} />
+                    <span>Favorites</span>
+                  </Link>
+                  <Link
+                    to="/profile"
+                    className={`mobile-nav-link ${isActive('/profile') ? 'active' : ''}`}
+                    onClick={closeMobileMenu}
+                  >
+                    <FiUser size={20} />
+                    <span>Profile</span>
+                  </Link>
+                  <button className="mobile-logout-btn" onClick={handleLogout}>
+                    <FiLogOut size={20} />
+                    <span>Logout</span>
+                  </button>
+                </nav>
+              </div>
+              
+              {/* Mobile Menu Overlay */}
+              <div 
+                className="mobile-nav-overlay" 
+                onClick={closeMobileMenu}
+              />
             </div>
           </>
         )}
