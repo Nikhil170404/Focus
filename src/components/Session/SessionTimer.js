@@ -8,66 +8,104 @@ function SessionTimer({ duration = 50, onComplete, autoStart = true, showControl
     isRunning: autoStart,
     isCompleted: false,
     startTime: Date.now(),
-    totalElapsed: 0
+    totalElapsed: 0,
+    lastUpdate: Date.now()
   });
 
   const [timeLeft, setTimeLeft] = useState(timerStateRef.current.timeLeft);
   const [isRunning, setIsRunning] = useState(timerStateRef.current.isRunning);
   const [isCompleted, setIsCompleted] = useState(timerStateRef.current.isCompleted);
-  const [soundEnabled, setSoundEnabled] = useState(true);
+  const [soundEnabled, setSoundEnabled] = useState(
+    localStorage.getItem('focusmate_sound_enabled') !== 'false'
+  );
   
   const intervalRef = useRef(null);
-  const audioRef = useRef(null);
+  const audioContextRef = useRef(null);
   const totalSeconds = duration * 60;
 
-  // Persist timer state in localStorage
+  // Initialize audio context
+  const initAudioContext = useCallback(() => {
+    if (!audioContextRef.current && window.AudioContext) {
+      try {
+        audioContextRef.current = new (window.AudioContext || window.webkitAudioContext)();
+      } catch (error) {
+        console.warn('Audio context not available:', error);
+      }
+    }
+  }, []);
+
+  // Persist timer state to localStorage
   const saveTimerState = useCallback(() => {
     if (sessionId) {
       const state = {
         ...timerStateRef.current,
         lastUpdate: Date.now()
       };
-      localStorage.setItem(`timer_${sessionId}`, JSON.stringify(state));
+      try {
+        localStorage.setItem(`focusmate_timer_${sessionId}`, JSON.stringify(state));
+      } catch (error) {
+        console.warn('Failed to save timer state:', error);
+      }
     }
   }, [sessionId]);
 
+  // Load timer state from localStorage
   const loadTimerState = useCallback(() => {
     if (sessionId) {
-      const saved = localStorage.getItem(`timer_${sessionId}`);
-      if (saved) {
-        try {
+      try {
+        const saved = localStorage.getItem(`focusmate_timer_${sessionId}`);
+        if (saved) {
           const state = JSON.parse(saved);
-          const timeSinceLastUpdate = Date.now() - state.lastUpdate;
+          const timeSinceLastUpdate = Date.now() - (state.lastUpdate || Date.now());
           
-          if (state.isRunning && !state.isCompleted) {
-            // Calculate how much time has passed since last update
+          if (state.isRunning && !state.isCompleted && timeSinceLastUpdate < 5 * 60 * 1000) {
+            // Only restore if less than 5 minutes have passed
             const secondsElapsed = Math.floor(timeSinceLastUpdate / 1000);
             const newTimeLeft = Math.max(0, state.timeLeft - secondsElapsed);
             
             timerStateRef.current = {
               ...state,
               timeLeft: newTimeLeft,
-              isCompleted: newTimeLeft <= 0
+              isCompleted: newTimeLeft <= 0,
+              lastUpdate: Date.now()
             };
-          } else {
-            timerStateRef.current = state;
+            
+            setTimeLeft(timerStateRef.current.timeLeft);
+            setIsRunning(timerStateRef.current.isRunning && !timerStateRef.current.isCompleted);
+            setIsCompleted(timerStateRef.current.isCompleted);
+            
+            return true; // State was restored
           }
-          
-          setTimeLeft(timerStateRef.current.timeLeft);
-          setIsRunning(timerStateRef.current.isRunning);
-          setIsCompleted(timerStateRef.current.isCompleted);
-        } catch (error) {
-          console.error('Error loading timer state:', error);
         }
+      } catch (error) {
+        console.warn('Failed to load timer state:', error);
       }
     }
+    return false; // State was not restored
   }, [sessionId]);
 
+  // Initialize timer
   useEffect(() => {
-    loadTimerState();
+    initAudioContext();
     
-    // Initialize audio for notifications
-    audioRef.current = new Audio();
+    // Try to load saved state, otherwise use defaults
+    const wasRestored = loadTimerState();
+    
+    if (!wasRestored) {
+      // Reset to initial state
+      timerStateRef.current = {
+        timeLeft: duration * 60,
+        isRunning: autoStart,
+        isCompleted: false,
+        startTime: Date.now(),
+        totalElapsed: 0,
+        lastUpdate: Date.now()
+      };
+      
+      setTimeLeft(timerStateRef.current.timeLeft);
+      setIsRunning(timerStateRef.current.isRunning);
+      setIsCompleted(false);
+    }
     
     return () => {
       if (intervalRef.current) {
@@ -75,8 +113,9 @@ function SessionTimer({ duration = 50, onComplete, autoStart = true, showControl
       }
       saveTimerState();
     };
-  }, [loadTimerState, saveTimerState]);
+  }, [duration, autoStart, sessionId, loadTimerState, saveTimerState, initAudioContext]);
 
+  // Timer logic
   useEffect(() => {
     if (isRunning && timeLeft > 0 && !isCompleted) {
       intervalRef.current = setInterval(() => {
@@ -85,12 +124,22 @@ function SessionTimer({ duration = 50, onComplete, autoStart = true, showControl
           
           // Update ref state
           timerStateRef.current.timeLeft = newTime;
+          timerStateRef.current.lastUpdate = Date.now();
           
-          // Play sound notifications at key intervals
-          if (soundEnabled && (newTime === 300 || newTime === 60 || newTime === 30)) {
-            playNotificationSound();
+          // Play notification sounds
+          if (soundEnabled) {
+            if (newTime === 300) { // 5 minutes
+              playNotificationSound(800, 0.3);
+            } else if (newTime === 60) { // 1 minute
+              playNotificationSound(1000, 0.4);
+            } else if (newTime === 30) { // 30 seconds
+              playNotificationSound(1200, 0.4);
+            } else if (newTime <= 10 && newTime > 0) { // Final countdown
+              playNotificationSound(1400, 0.2);
+            }
           }
           
+          // Timer completed
           if (newTime <= 0) {
             timerStateRef.current.isCompleted = true;
             timerStateRef.current.isRunning = false;
@@ -103,22 +152,24 @@ function SessionTimer({ duration = 50, onComplete, autoStart = true, showControl
             
             // Clear saved state when completed
             if (sessionId) {
-              localStorage.removeItem(`timer_${sessionId}`);
+              try {
+                localStorage.removeItem(`focusmate_timer_${sessionId}`);
+              } catch (error) {
+                console.warn('Failed to clear timer state:', error);
+              }
             }
             
+            // Call completion callback
             if (onComplete) {
               setTimeout(() => onComplete(), 1000);
             }
+            
             return 0;
           }
           
           // Save state periodically
-          if (newTime % 10 === 0) {
-            timerStateRef.current.lastUpdate = Date.now();
-            if (sessionId) {
-              const state = { ...timerStateRef.current };
-              localStorage.setItem(`timer_${sessionId}`, JSON.stringify(state));
-            }
+          if (newTime % 30 === 0) { // Every 30 seconds
+            setTimeout(saveTimerState, 0);
           }
           
           return newTime;
@@ -136,7 +187,44 @@ function SessionTimer({ duration = 50, onComplete, autoStart = true, showControl
         clearInterval(intervalRef.current);
       }
     };
-  }, [isRunning, timeLeft, isCompleted, onComplete, soundEnabled, sessionId]);
+  }, [isRunning, timeLeft, isCompleted, onComplete, soundEnabled, sessionId, saveTimerState]);
+
+  // Handle page visibility changes
+  useEffect(() => {
+    const handleVisibilityChange = () => {
+      if (!document.hidden && isRunning) {
+        // Page became visible again, sync timer
+        const savedState = sessionId ? localStorage.getItem(`focusmate_timer_${sessionId}`) : null;
+        if (savedState) {
+          try {
+            const state = JSON.parse(savedState);
+            const timeSinceLastUpdate = Date.now() - (state.lastUpdate || Date.now());
+            if (timeSinceLastUpdate > 2000) { // More than 2 seconds difference
+              const secondsElapsed = Math.floor(timeSinceLastUpdate / 1000);
+              const newTimeLeft = Math.max(0, state.timeLeft - secondsElapsed);
+              
+              if (newTimeLeft !== timeLeft) {
+                setTimeLeft(newTimeLeft);
+                timerStateRef.current.timeLeft = newTimeLeft;
+                
+                if (newTimeLeft <= 0 && !isCompleted) {
+                  setIsCompleted(true);
+                  setIsRunning(false);
+                  timerStateRef.current.isCompleted = true;
+                  timerStateRef.current.isRunning = false;
+                }
+              }
+            }
+          } catch (error) {
+            console.warn('Failed to sync timer state:', error);
+          }
+        }
+      }
+    };
+
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+    return () => document.removeEventListener('visibilitychange', handleVisibilityChange);
+  }, [isRunning, timeLeft, isCompleted, sessionId]);
 
   // Save state when component unmounts or page unloads
   useEffect(() => {
@@ -151,54 +239,56 @@ function SessionTimer({ duration = 50, onComplete, autoStart = true, showControl
     };
   }, [saveTimerState]);
 
-  const playNotificationSound = () => {
+  const playNotificationSound = useCallback((frequency = 800, volume = 0.3) => {
+    if (!soundEnabled || !audioContextRef.current) return;
+    
     try {
-      const audioContext = new (window.AudioContext || window.webkitAudioContext)();
-      const oscillator = audioContext.createOscillator();
-      const gainNode = audioContext.createGain();
+      const oscillator = audioContextRef.current.createOscillator();
+      const gainNode = audioContextRef.current.createGain();
       
       oscillator.connect(gainNode);
-      gainNode.connect(audioContext.destination);
+      gainNode.connect(audioContextRef.current.destination);
       
-      oscillator.frequency.value = 800;
+      oscillator.frequency.value = frequency;
       oscillator.type = 'sine';
       
-      gainNode.gain.setValueAtTime(0.3, audioContext.currentTime);
-      gainNode.gain.exponentialRampToValueAtTime(0.01, audioContext.currentTime + 0.5);
+      gainNode.gain.setValueAtTime(volume, audioContextRef.current.currentTime);
+      gainNode.gain.exponentialRampToValueAtTime(0.01, audioContextRef.current.currentTime + 0.3);
       
-      oscillator.start(audioContext.currentTime);
-      oscillator.stop(audioContext.currentTime + 0.5);
+      oscillator.start(audioContextRef.current.currentTime);
+      oscillator.stop(audioContextRef.current.currentTime + 0.3);
     } catch (error) {
-      console.log('Audio notification not available');
+      console.warn('Audio notification failed:', error);
     }
-  };
+  }, [soundEnabled]);
 
-  const playCompletionSound = () => {
+  const playCompletionSound = useCallback(() => {
+    if (!soundEnabled || !audioContextRef.current) return;
+    
     try {
-      const audioContext = new (window.AudioContext || window.webkitAudioContext)();
-      const notes = [523.25, 659.25, 783.99]; // C, E, G
+      const notes = [523.25, 659.25, 783.99]; // C, E, G chord
       
       notes.forEach((frequency, index) => {
-        const oscillator = audioContext.createOscillator();
-        const gainNode = audioContext.createGain();
+        const oscillator = audioContextRef.current.createOscillator();
+        const gainNode = audioContextRef.current.createGain();
         
         oscillator.connect(gainNode);
-        gainNode.connect(audioContext.destination);
+        gainNode.connect(audioContextRef.current.destination);
         
         oscillator.frequency.value = frequency;
         oscillator.type = 'sine';
         
-        const startTime = audioContext.currentTime + (index * 0.2);
-        gainNode.gain.setValueAtTime(0.3, startTime);
-        gainNode.gain.exponentialRampToValueAtTime(0.01, startTime + 0.3);
+        const startTime = audioContextRef.current.currentTime + (index * 0.15);
+        gainNode.gain.setValueAtTime(0.2, startTime);
+        gainNode.gain.exponentialRampToValueAtTime(0.01, startTime + 0.4);
         
         oscillator.start(startTime);
-        oscillator.stop(startTime + 0.3);
+        oscillator.stop(startTime + 0.4);
       });
     } catch (error) {
-      console.log('Audio notification not available');
+      console.warn('Completion sound failed:', error);
     }
-  };
+  }, [soundEnabled]);
 
   const formatTime = (seconds) => {
     const mins = Math.floor(seconds / 60);
@@ -229,26 +319,43 @@ function SessionTimer({ duration = 50, onComplete, autoStart = true, showControl
   };
 
   const resetTimer = () => {
-    timerStateRef.current = {
-      timeLeft: totalSeconds,
-      isRunning: autoStart,
-      isCompleted: false,
-      startTime: Date.now(),
-      totalElapsed: 0
-    };
-    
-    setTimeLeft(totalSeconds);
-    setIsRunning(autoStart);
-    setIsCompleted(false);
-    
-    // Clear saved state
-    if (sessionId) {
-      localStorage.removeItem(`timer_${sessionId}`);
+    if (window.confirm('Are you sure you want to reset the timer?')) {
+      timerStateRef.current = {
+        timeLeft: totalSeconds,
+        isRunning: autoStart,
+        isCompleted: false,
+        startTime: Date.now(),
+        totalElapsed: 0,
+        lastUpdate: Date.now()
+      };
+      
+      setTimeLeft(totalSeconds);
+      setIsRunning(autoStart);
+      setIsCompleted(false);
+      
+      // Clear saved state
+      if (sessionId) {
+        try {
+          localStorage.removeItem(`focusmate_timer_${sessionId}`);
+        } catch (error) {
+          console.warn('Failed to clear timer state:', error);
+        }
+      }
     }
   };
 
   const toggleSound = () => {
-    setSoundEnabled(!soundEnabled);
+    const newSoundState = !soundEnabled;
+    setSoundEnabled(newSoundState);
+    try {
+      localStorage.setItem('focusmate_sound_enabled', newSoundState.toString());
+    } catch (error) {
+      console.warn('Failed to save sound preference:', error);
+    }
+    
+    if (newSoundState) {
+      initAudioContext();
+    }
   };
 
   const getTimerColor = () => {
@@ -265,6 +372,22 @@ function SessionTimer({ duration = 50, onComplete, autoStart = true, showControl
     if (timeLeft <= 60) return 'Almost done!';
     if (timeLeft <= 300) return 'Final sprint!';
     return 'Stay focused!';
+  };
+
+  const getMotivationalTip = () => {
+    const tips = [
+      "💡 Remove distractions from your workspace",
+      "🧘 Take deep breaths to stay calm and focused", 
+      "📝 Write down any distracting thoughts",
+      "🎵 Use background music to maintain concentration",
+      "💪 Stay hydrated and maintain good posture",
+      "🎯 Break large tasks into smaller chunks",
+      "⏰ Use the Pomodoro technique for better focus",
+      "🚫 Turn off non-essential notifications"
+    ];
+    
+    const tipIndex = Math.floor((totalSeconds - timeLeft) / 300) % tips.length;
+    return tips[tipIndex];
   };
 
   return (
@@ -372,30 +495,11 @@ function SessionTimer({ duration = 50, onComplete, autoStart = true, showControl
         />
       </div>
       
-      {/* Motivational tips */}
+      {/* Motivational tip */}
       <div className="timer-tips">
-        <h4>🎯 Focus Tips</h4>
-        <div className="tips-carousel">
-          <div className="tip active">
-            <span className="tip-icon">💡</span>
-            <span>Remove distractions from your workspace</span>
-          </div>
-          <div className="tip">
-            <span className="tip-icon">🧘</span>
-            <span>Take deep breaths to stay calm and focused</span>
-          </div>
-          <div className="tip">
-            <span className="tip-icon">📝</span>
-            <span>Write down any distracting thoughts</span>
-          </div>
-          <div className="tip">
-            <span className="tip-icon">🎵</span>
-            <span>Use background music to maintain concentration</span>
-          </div>
-          <div className="tip">
-            <span className="tip-icon">💪</span>
-            <span>Stay hydrated and maintain good posture</span>
-          </div>
+        <h4>🎯 Focus Tip</h4>
+        <div className="tip active">
+          <span>{getMotivationalTip()}</span>
         </div>
       </div>
     </div>

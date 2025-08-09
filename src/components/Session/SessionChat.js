@@ -2,6 +2,7 @@ import React, { useState, useEffect, useRef } from 'react';
 import { collection, addDoc, query, where, orderBy, onSnapshot, serverTimestamp } from 'firebase/firestore';
 import { db } from '../../config/firebase';
 import { FiSend, FiSmile, FiMoreVertical } from 'react-icons/fi';
+import toast from 'react-hot-toast';
 
 function SessionChat({ sessionId, userId, userName, partnerId, partnerName }) {
   const [messages, setMessages] = useState([]);
@@ -9,6 +10,7 @@ function SessionChat({ sessionId, userId, userName, partnerId, partnerName }) {
   const [isTyping, setIsTyping] = useState(false);
   const [isMobile, setIsMobile] = useState(window.innerWidth < 768);
   const [showQuickMessages, setShowQuickMessages] = useState(true);
+  const [loading, setLoading] = useState(true);
   const messagesEndRef = useRef(null);
   const chatInputRef = useRef(null);
   const unsubscribeRef = useRef(null);
@@ -31,11 +33,8 @@ function SessionChat({ sessionId, userId, userName, partnerId, partnerName }) {
   }, [messages]);
 
   useEffect(() => {
-    if (sessionId && sessionId !== 'demo') {
+    if (sessionId && userId) {
       setupRealTimeChat();
-    } else {
-      // Setup demo messages for offline mode
-      setupDemoMessages();
     }
 
     return () => {
@@ -47,6 +46,8 @@ function SessionChat({ sessionId, userId, userName, partnerId, partnerName }) {
 
   const setupRealTimeChat = () => {
     try {
+      setLoading(true);
+      
       const messagesQuery = query(
         collection(db, 'chats', sessionId, 'messages'),
         orderBy('timestamp', 'asc')
@@ -55,170 +56,85 @@ function SessionChat({ sessionId, userId, userName, partnerId, partnerName }) {
       unsubscribeRef.current = onSnapshot(messagesQuery, (snapshot) => {
         const messagesData = snapshot.docs.map(doc => ({
           id: doc.id,
-          ...doc.data()
+          ...doc.data(),
+          timestamp: doc.data().timestamp?.toDate() || new Date()
         }));
+        
         setMessages(messagesData);
+        setLoading(false);
+        
+        // Add welcome message if no messages exist
+        if (messagesData.length === 0) {
+          addSystemMessage("Welcome to your focus session! 🎯 Use this chat to communicate with your partner.");
+        }
       }, (error) => {
         console.error('Error listening to messages:', error);
-        // Fallback to demo mode if Firebase fails
-        setupDemoMessages();
+        toast.error('Failed to load chat messages');
+        setLoading(false);
       });
 
-      // Add welcome message for new chats
-      if (messages.length === 0) {
-        addSystemMessage("Welcome to your focus session! 🎯 Use this chat to communicate with your partner.");
-      }
     } catch (error) {
       console.error('Error setting up real-time chat:', error);
-      setupDemoMessages();
+      toast.error('Failed to setup chat');
+      setLoading(false);
     }
   };
 
-  const setupDemoMessages = () => {
-    const demoMessages = [
-      { 
-        id: 'demo-1', 
-        text: "Welcome to your focus session! 🎯", 
-        userId: 'system', 
-        userName: 'FocusMate', 
-        timestamp: new Date(),
-        type: 'system'
-      },
-      { 
-        id: 'demo-2', 
-        text: "Stay focused and make the most of this time!", 
-        userId: 'system', 
-        userName: 'FocusMate', 
-        timestamp: new Date(),
-        type: 'system'
-      }
-    ];
-    setMessages(demoMessages);
-
-    // Simulate partner joining in demo mode
-    setTimeout(() => {
-      if (partnerName) {
-        addDemoMessage(`${partnerName} joined the session`, 'system');
-      }
-    }, 2000);
-  };
-
   const addSystemMessage = async (text) => {
-    const systemMessage = {
-      text: text,
-      userId: 'system',
-      userName: 'FocusMate',
-      timestamp: serverTimestamp(),
-      type: 'system'
-    };
-
     try {
+      const systemMessage = {
+        text: text,
+        userId: 'system',
+        userName: 'FocusMate',
+        timestamp: serverTimestamp(),
+        type: 'system'
+      };
+
       await addDoc(collection(db, 'chats', sessionId, 'messages'), systemMessage);
     } catch (error) {
       console.error('Error adding system message:', error);
     }
   };
 
-  const addDemoMessage = (text, type = 'partner') => {
-    const message = {
-      id: Date.now() + Math.random(),
-      text: text,
-      userId: type === 'system' ? 'system' : (partnerId || 'partner'),
-      userName: type === 'system' ? 'FocusMate' : (partnerName || 'Focus Partner'),
-      timestamp: new Date(),
-      type: type
-    };
-    
-    setMessages(prev => [...prev, message]);
-  };
-
   const sendMessage = async (e) => {
     e.preventDefault();
-    if (!newMessage.trim()) return;
+    if (!newMessage.trim() || !sessionId || !userId) return;
 
-    const messageData = {
-      text: newMessage.trim(),
-      userId: userId,
-      userName: userName,
-      timestamp: serverTimestamp(),
-      type: 'user'
-    };
+    const messageText = newMessage.trim();
+    setNewMessage('');
 
     try {
-      if (sessionId && sessionId !== 'demo') {
-        // Send to Firebase
-        await addDoc(collection(db, 'chats', sessionId, 'messages'), messageData);
-      } else {
-        // Demo mode - add message locally
-        const localMessage = {
-          ...messageData,
-          id: Date.now(),
-          timestamp: new Date()
-        };
-        setMessages(prev => [...prev, localMessage]);
+      const messageData = {
+        text: messageText,
+        userId: userId,
+        userName: userName,
+        timestamp: serverTimestamp(),
+        type: 'user'
+      };
 
-        // Simulate partner response in demo mode
-        simulatePartnerResponse();
-      }
-
-      setNewMessage('');
+      await addDoc(collection(db, 'chats', sessionId, 'messages'), messageData);
       setShowQuickMessages(false);
       
       // Focus back on input
       chatInputRef.current?.focus();
+      
     } catch (error) {
       console.error('Error sending message:', error);
-      // Fallback to local message
-      const localMessage = {
-        ...messageData,
-        id: Date.now(),
-        timestamp: new Date()
-      };
-      setMessages(prev => [...prev, localMessage]);
-      setNewMessage('');
-    }
-  };
-
-  const simulatePartnerResponse = () => {
-    if (Math.random() > 0.5) { // 50% chance for partner to respond
-      setIsTyping(true);
-      setTimeout(() => {
-        setIsTyping(false);
-        const responses = [
-          "Great point!",
-          "Thanks for sharing!",
-          "Keep it up! 👍",
-          "That sounds productive!",
-          "Nice work!",
-          "I'm focused too!",
-          "Good luck with that!",
-          "You've got this! 🚀",
-          "Same here!",
-          "Let's stay focused! 💪"
-        ];
-        const randomResponse = responses[Math.floor(Math.random() * responses.length)];
-        addDemoMessage(randomResponse);
-      }, 1000 + Math.random() * 2000);
+      toast.error('Failed to send message');
+      setNewMessage(messageText); // Restore message on error
     }
   };
 
   const formatTime = (timestamp) => {
-    const date = timestamp?.toDate ? timestamp.toDate() : new Date(timestamp);
-    return date.toLocaleTimeString('en-US', { 
-      hour: 'numeric', 
-      minute: '2-digit',
-      hour12: true
-    });
-  };
-
-  const getMessageIcon = (type) => {
-    switch (type) {
-      case 'system':
-        return '🤖';
-      case 'partner':
-        return '👤';
-      default:
-        return '💭';
+    try {
+      const date = timestamp instanceof Date ? timestamp : new Date(timestamp);
+      return date.toLocaleTimeString('en-US', { 
+        hour: 'numeric', 
+        minute: '2-digit',
+        hour12: true
+      });
+    } catch (error) {
+      return '';
     }
   };
 
@@ -243,13 +159,33 @@ function SessionChat({ sessionId, userId, userName, partnerId, partnerName }) {
   const sendQuickMessage = (messageText) => {
     setNewMessage(messageText);
     setTimeout(() => {
-      sendMessage({ preventDefault: () => {} });
+      const fakeEvent = { preventDefault: () => {} };
+      sendMessage(fakeEvent);
     }, 100);
   };
 
   const toggleQuickMessages = () => {
     setShowQuickMessages(!showQuickMessages);
   };
+
+  const getMessageIcon = (type, userId) => {
+    if (type === 'system') return '🤖';
+    return userId === userId ? '💭' : '👤';
+  };
+
+  if (loading) {
+    return (
+      <div className="chat-widget">
+        <div className="chat-header">
+          <h4>Session Chat</h4>
+        </div>
+        <div className="loading-container">
+          <div className="spinner"></div>
+          <p>Loading chat...</p>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="chat-widget">
@@ -258,43 +194,41 @@ function SessionChat({ sessionId, userId, userName, partnerId, partnerName }) {
           <h4>Session Chat</h4>
           <span className="online-indicator">
             <span className="pulse"></span>
-            {partnerId ? 'Partner Online' : 'Demo Mode'}
+            {partnerId ? 'Partner Online' : 'Waiting for Partner'}
           </span>
         </div>
-        {isMobile && (
-          <button 
-            className="chat-menu-btn"
-            onClick={toggleQuickMessages}
-            aria-label="Toggle quick messages"
-          >
-            <FiMoreVertical size={16} />
-          </button>
-        )}
       </div>
       
       <div className="chat-messages">
-        {messages.map(msg => (
-          <div 
-            key={msg.id} 
-            className={`message ${msg.userId === userId ? 'own' : ''} ${msg.type || 'user'}`}
-          >
-            <div className="message-avatar">
-              {msg.type === 'system' ? '🤖' : 
-               msg.userId === userId ? 
-                 (userName?.charAt(0).toUpperCase() || '👤') : 
-                 (partnerName?.charAt(0).toUpperCase() || '👥')}
-            </div>
-            <div className="message-content">
-              <div className="message-header">
-                <span className="message-sender">{msg.userName}</span>
-                <span className="message-time">{formatTime(msg.timestamp)}</span>
-              </div>
-              <div className="message-bubble">
-                <div className="message-text">{msg.text}</div>
-              </div>
-            </div>
+        {messages.length === 0 && !loading ? (
+          <div className="empty-chat">
+            <div className="empty-chat-icon">💬</div>
+            <p>No messages yet. Start the conversation!</p>
           </div>
-        ))}
+        ) : (
+          messages.map(msg => (
+            <div 
+              key={msg.id} 
+              className={`message ${msg.userId === userId ? 'own' : ''} ${msg.type || 'user'}`}
+            >
+              <div className="message-avatar">
+                {msg.type === 'system' ? '🤖' : 
+                 msg.userId === userId ? 
+                   (userName?.charAt(0).toUpperCase() || '👤') : 
+                   (partnerName?.charAt(0).toUpperCase() || '👥')}
+              </div>
+              <div className="message-content">
+                <div className="message-header">
+                  <span className="message-sender">{msg.userName}</span>
+                  <span className="message-time">{formatTime(msg.timestamp)}</span>
+                </div>
+                <div className="message-bubble">
+                  <div className="message-text">{msg.text}</div>
+                </div>
+              </div>
+            </div>
+          ))
+        )}
         
         {isTyping && (
           <div className="message typing-indicator">
@@ -315,19 +249,17 @@ function SessionChat({ sessionId, userId, userName, partnerId, partnerName }) {
         <div ref={messagesEndRef} />
       </div>
       
-      {/* Quick Messages */}
-      {showQuickMessages && (
-        <div className="quick-messages">
+      {/* Quick Messages - Mobile Only */}
+      {showQuickMessages && isMobile && (
+        <div className="quick-messages mobile-only">
           <div className="quick-messages-header">
             <span>Quick Messages</span>
-            {isMobile && (
-              <button 
-                className="close-quick-messages"
-                onClick={() => setShowQuickMessages(false)}
-              >
-                ×
-              </button>
-            )}
+            <button 
+              className="close-quick-messages"
+              onClick={() => setShowQuickMessages(false)}
+            >
+              ×
+            </button>
           </div>
           <div className="quick-messages-grid">
             {quickMessages.map((message, index) => (
@@ -351,10 +283,11 @@ function SessionChat({ sessionId, userId, userName, partnerId, partnerName }) {
             value={newMessage}
             onChange={(e) => setNewMessage(e.target.value)}
             onKeyPress={handleKeyPress}
-            placeholder={isMobile ? "Type a message..." : "Type a message... (Enter to send)"}
+            placeholder="Type a message..."
             className="chat-input"
-            rows={isMobile ? 1 : 1}
+            rows={1}
             maxLength={500}
+            disabled={!sessionId}
           />
           <div className="chat-input-actions">
             {!isMobile && (
@@ -370,7 +303,7 @@ function SessionChat({ sessionId, userId, userName, partnerId, partnerName }) {
             <button 
               type="submit" 
               className={`send-button ${newMessage.trim() ? 'active' : ''}`}
-              disabled={!newMessage.trim()}
+              disabled={!newMessage.trim() || !sessionId}
               title="Send message"
             >
               <FiSend size={16} />
@@ -382,7 +315,7 @@ function SessionChat({ sessionId, userId, userName, partnerId, partnerName }) {
             {newMessage.length}/500
           </span>
           <span className="chat-tip">
-            💡 {isMobile ? 'Stay focused & encourage each other' : 'Keep messages focused and encouraging'}
+            💡 Keep messages focused and encouraging
           </span>
         </div>
       </form>
