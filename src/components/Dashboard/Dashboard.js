@@ -1,13 +1,33 @@
 import React, { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { collection, query, where, getDocs, orderBy, limit } from 'firebase/firestore';
+import { 
+  collection, 
+  query, 
+  where, 
+  getDocs, 
+  orderBy, 
+  limit,
+  doc,
+  updateDoc,
+  serverTimestamp 
+} from 'firebase/firestore';
 import { db } from '../../config/firebase';
 import { useAuth } from '../../hooks/useAuth';
 import SessionCard from './SessionCard';
 import Stats from './Stats';
 import { CSSLoadingSpinner, SkeletonLoader } from '../Common/LoadingSpinner';
-import { FiPlus, FiCalendar, FiUsers, FiClock, FiTrendingUp, FiRefreshCw, FiMic, FiVideo } from 'react-icons/fi';
-import { format, isToday, isTomorrow, isYesterday } from 'date-fns';
+import { 
+  FiPlus, 
+  FiCalendar, 
+  FiUsers, 
+  FiClock, 
+  FiTrendingUp, 
+  FiRefreshCw, 
+  FiTarget,
+  FiBook,
+  FiAward 
+} from 'react-icons/fi';
+import { format, isToday, isTomorrow, isYesterday, startOfDay, endOfDay, differenceInDays } from 'date-fns';
 import toast from 'react-hot-toast';
 
 function Dashboard() {
@@ -19,13 +39,26 @@ function Dashboard() {
     totalSessions: 0,
     totalMinutes: 0,
     streak: 0,
-    favorites: 0
+    thisWeek: 0,
+    thisMonth: 0,
+    level: 1
   });
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [activeTab, setActiveTab] = useState('upcoming');
   const [error, setError] = useState(null);
   const [isMobile, setIsMobile] = useState(window.innerWidth < 768);
+  const [motivationalQuote, setMotivationalQuote] = useState('');
+
+  const indiaFocusedQuotes = [
+    "करम कर, फल की चिंता मत कर - Focus on your action, not the result 🎯",
+    "सफलता का रहस्य है निरंतर अभ्यास - Success secret is continuous practice 📚",
+    "छोटे कदम, बड़े सपने - Small steps, big dreams 🚀",
+    "आज का कठिन परिश्रम, कल की सफलता - Today's hard work, tomorrow's success 💪",
+    "Focus is the bridge between goals and achievement 🌉",
+    "Every JEE/NEET aspirant needs focused study sessions 📖",
+    "Transform your dreams into reality through focused action ✨"
+  ];
 
   useEffect(() => {
     const handleResize = () => {
@@ -38,7 +71,13 @@ function Dashboard() {
 
   useEffect(() => {
     fetchUserData();
+    setRandomQuote();
   }, [user]);
+
+  const setRandomQuote = () => {
+    const randomQuote = indiaFocusedQuotes[Math.floor(Math.random() * indiaFocusedQuotes.length)];
+    setMotivationalQuote(randomQuote);
+  };
 
   const fetchUserData = async (showRefreshIndicator = false) => {
     try {
@@ -49,7 +88,7 @@ function Dashboard() {
       }
       setError(null);
 
-      // Fetch upcoming sessions
+      // Fetch upcoming sessions (scheduled and active)
       const upcomingQuery = query(
         collection(db, 'sessions'),
         where('userId', '==', user.uid),
@@ -77,8 +116,8 @@ function Dashboard() {
         collection(db, 'sessions'),
         where('userId', '==', user.uid),
         where('status', '==', 'completed'),
-        orderBy('endTime', 'desc'),
-        limit(10)
+        orderBy('endedAt', 'desc'),
+        limit(50) // Get more for accurate streak calculation
       );
       
       const completedSnapshot = await getDocs(completedQuery);
@@ -89,21 +128,12 @@ function Dashboard() {
       
       setCompletedSessions(completedData);
 
-      // Calculate stats
-      const totalSessions = completedData.length;
-      const totalMinutes = completedData.reduce((acc, session) => {
-        return acc + (session.duration || 0);
-      }, 0);
+      // Calculate comprehensive stats
+      const calculatedStats = calculateStats(completedData);
+      setStats(calculatedStats);
 
-      const calculatedStreak = calculateStreak(completedData);
-      const favoritesCount = await getFavoritesCount();
-
-      setStats({
-        totalSessions,
-        totalMinutes,
-        streak: calculatedStreak,
-        favorites: favoritesCount
-      });
+      // Update user stats in Firebase
+      await updateUserStats(calculatedStats);
 
     } catch (error) {
       console.error('Error fetching user data:', error);
@@ -115,95 +145,146 @@ function Dashboard() {
     }
   };
 
-  const calculateStreak = (sessions) => {
+  const calculateStats = (sessions) => {
+    const totalSessions = sessions.length;
+    const totalMinutes = sessions.reduce((acc, session) => {
+      return acc + (session.actualDuration || session.duration || 0);
+    }, 0);
+
+    // Calculate streak properly
+    const streak = calculateProperStreak(sessions);
+    
+    // Calculate this week's sessions
+    const thisWeekStart = startOfDay(new Date());
+    thisWeekStart.setDate(thisWeekStart.getDate() - thisWeekStart.getDay()); // Start of week
+    const thisWeek = sessions.filter(session => {
+      const sessionDate = new Date(session.endedAt || session.completedAt);
+      return sessionDate >= thisWeekStart;
+    }).length;
+
+    // Calculate this month's sessions
+    const thisMonthStart = new Date();
+    thisMonthStart.setDate(1);
+    thisMonthStart.setHours(0, 0, 0, 0);
+    const thisMonth = sessions.filter(session => {
+      const sessionDate = new Date(session.endedAt || session.completedAt);
+      return sessionDate >= thisMonthStart;
+    }).length;
+
+    // Calculate level based on total sessions (gamification for India students)
+    const level = Math.floor(totalSessions / 10) + 1; // Level up every 10 sessions
+
+    return {
+      totalSessions,
+      totalMinutes,
+      streak,
+      thisWeek,
+      thisMonth,
+      level
+    };
+  };
+
+  const calculateProperStreak = (sessions) => {
     if (!sessions || sessions.length === 0) return 0;
     
-    // Sort sessions by completion date
+    // Sort sessions by completion date (most recent first)
     const sortedSessions = sessions.sort((a, b) => 
-      new Date(b.endTime || b.completedAt) - new Date(a.endTime || a.completedAt)
+      new Date(b.endedAt || b.completedAt) - new Date(a.endedAt || a.completedAt)
     );
     
+    // Group sessions by date
+    const sessionsByDate = {};
+    sortedSessions.forEach(session => {
+      const sessionDate = new Date(session.endedAt || session.completedAt);
+      const dateKey = startOfDay(sessionDate).toISOString();
+      
+      if (!sessionsByDate[dateKey]) {
+        sessionsByDate[dateKey] = [];
+      }
+      sessionsByDate[dateKey].push(session);
+    });
+    
+    const uniqueDates = Object.keys(sessionsByDate).sort((a, b) => new Date(b) - new Date(a));
+    
+    if (uniqueDates.length === 0) return 0;
+    
     let streak = 0;
-    let currentDate = new Date();
-    currentDate.setHours(0, 0, 0, 0);
+    const today = startOfDay(new Date());
+    const yesterday = new Date(today);
+    yesterday.setDate(yesterday.getDate() - 1);
     
-    // Check if there's a session today or yesterday to start the streak
-    const hasSessionToday = sortedSessions.some(session => {
-      const sessionDate = new Date(session.endTime || session.completedAt);
-      return isToday(sessionDate);
-    });
+    // Check if streak can start (must have session today or yesterday)
+    const latestDate = new Date(uniqueDates[0]);
+    const latestIsToday = latestDate.toDateString() === today.toDateString();
+    const latestIsYesterday = latestDate.toDateString() === yesterday.toDateString();
     
-    const hasSessionYesterday = sortedSessions.some(session => {
-      const sessionDate = new Date(session.endTime || session.completedAt);
-      return isYesterday(sessionDate);
-    });
-    
-    if (!hasSessionToday && !hasSessionYesterday) {
-      return 0;
+    if (!latestIsToday && !latestIsYesterday) {
+      return 0; // No recent activity, streak is broken
     }
     
     // Calculate consecutive days
-    const uniqueDays = new Set();
-    sortedSessions.forEach(session => {
-      const sessionDate = new Date(session.endTime || session.completedAt);
-      const dayKey = sessionDate.toDateString();
-      uniqueDays.add(dayKey);
-    });
+    let currentDate = latestIsToday ? today : yesterday;
     
-    const sortedDays = Array.from(uniqueDays).sort((a, b) => new Date(b) - new Date(a));
-    
-    let consecutiveDays = 0;
-    for (let i = 0; i < sortedDays.length; i++) {
-      const day = new Date(sortedDays[i]);
-      const expectedDate = new Date(currentDate);
-      expectedDate.setDate(currentDate.getDate() - i);
+    for (const dateString of uniqueDates) {
+      const sessionDate = new Date(dateString);
       
-      if (day.toDateString() === expectedDate.toDateString()) {
-        consecutiveDays++;
+      if (sessionDate.toDateString() === currentDate.toDateString()) {
+        streak++;
+        currentDate.setDate(currentDate.getDate() - 1);
       } else {
-        break;
+        // Check if there's a gap
+        const daysDiff = differenceInDays(currentDate, sessionDate);
+        if (daysDiff === -1) {
+          // Consecutive day found
+          streak++;
+          currentDate = sessionDate;
+          currentDate.setDate(currentDate.getDate() - 1);
+        } else {
+          // Gap found, streak broken
+          break;
+        }
       }
     }
     
-    return consecutiveDays;
+    return streak;
   };
 
-  const getFavoritesCount = async () => {
+  const updateUserStats = async (calculatedStats) => {
     try {
-      const favQuery = query(
-        collection(db, 'favorites'),
-        where('userId', '==', user.uid)
-      );
-      const favSnapshot = await getDocs(favQuery);
-      return favSnapshot.size;
+      const userDocRef = doc(db, 'users', user.uid);
+      await updateDoc(userDocRef, {
+        totalSessions: calculatedStats.totalSessions,
+        totalMinutes: calculatedStats.totalMinutes,
+        currentStreak: calculatedStats.streak,
+        level: calculatedStats.level,
+        lastActivityDate: serverTimestamp(),
+        updatedAt: serverTimestamp()
+      });
     } catch (error) {
-      console.error('Error fetching favorites:', error);
-      return 0;
+      console.error('Error updating user stats:', error);
     }
   };
 
   const formatGreeting = () => {
     const hour = new Date().getHours();
-    const name = user.displayName?.split(' ')[0] || 'Focus Warrior';
+    const name = user.displayName?.split(' ')[0] || 'Student';
     
-    if (hour < 12) return `Good morning, ${name}!`;
-    if (hour < 17) return `Good afternoon, ${name}!`;
-    return `Good evening, ${name}!`;
+    if (hour < 12) return `शुभ प्रभात, ${name}! Good morning!`;
+    if (hour < 17) return `नमस्ते, ${name}! Good afternoon!`;
+    return `शुभ संध्या, ${name}! Good evening!`;
   };
 
-  const getMotivationalMessage = () => {
-    const messages = [
-      "Ready to tackle your goals today? 🎯",
-      "Every focused session brings you closer to success! 💪",
-      "Your consistency is building something amazing! ✨",
-      "Time to turn your dreams into achievements! 🚀",
-      "Focus today, celebrate tomorrow! 🌟"
-    ];
-    return messages[Math.floor(Math.random() * messages.length)];
+  const getStudentLevel = (level) => {
+    if (level >= 20) return { title: "Focus Master", color: "#8B5CF6", icon: "👑" };
+    if (level >= 15) return { title: "Study Expert", color: "#06B6D4", icon: "🎓" };
+    if (level >= 10) return { title: "Dedicated Learner", color: "#10B981", icon: "📚" };
+    if (level >= 5) return { title: "Rising Scholar", color: "#F59E0B", icon: "⭐" };
+    return { title: "Beginner", color: "#6B7280", icon: "🌱" };
   };
 
   const handleRefresh = () => {
     fetchUserData(true);
+    setRandomQuote();
   };
 
   const getNextSessionInfo = () => {
@@ -233,7 +314,7 @@ function Dashboard() {
       session: nextSession,
       timeString,
       isUpcoming: timeDiff > 0,
-      canJoinEarly: timeDiff < 15 * 60 * 1000 // Can join 15 minutes early
+      canJoinEarly: timeDiff < 15 * 60 * 1000
     };
   };
 
@@ -246,19 +327,29 @@ function Dashboard() {
       icon: FiCalendar,
       label: 'Book Session',
       action: () => navigate('/book-session'),
-      color: 'primary'
+      color: 'primary',
+      description: 'Schedule focused study time'
     },
     {
-      icon: FiUsers,
-      label: 'Favorites',
-      action: () => navigate('/favorites'),
-      color: 'secondary'
-    },
-    {
-      icon: FiTrendingUp,
-      label: 'Stats',
+      icon: FiTarget,
+      label: 'Study Goals',
       action: () => navigate('/profile'),
-      color: 'success'
+      color: 'success',
+      description: 'Set your targets'
+    },
+    {
+      icon: FiBook,
+      label: 'Study Stats',
+      action: () => navigate('/profile'),
+      color: 'warning',
+      description: 'Track progress'
+    },
+    {
+      icon: FiAward,
+      label: 'Achievements',
+      action: () => navigate('/profile'),
+      color: 'secondary',
+      description: 'View rewards'
     }
   ];
 
@@ -300,6 +391,7 @@ function Dashboard() {
   }
 
   const nextSessionInfo = getNextSessionInfo();
+  const studentLevel = getStudentLevel(stats.level);
 
   return (
     <div className="dashboard">
@@ -308,7 +400,12 @@ function Dashboard() {
         <div className="header-content">
           <div className="greeting-section">
             <h1>{formatGreeting()}</h1>
-            <p className="motivational-message">{getMotivationalMessage()}</p>
+            <p className="motivational-message">{motivationalQuote}</p>
+            <div className="student-level">
+              <span className="level-badge" style={{ backgroundColor: studentLevel.color }}>
+                {studentLevel.icon} Level {stats.level} - {studentLevel.title}
+              </span>
+            </div>
           </div>
           
           <div className="header-actions">
@@ -317,7 +414,6 @@ function Dashboard() {
               onClick={handleRefresh}
               disabled={refreshing}
               title="Refresh data"
-              aria-label="Refresh dashboard data"
             >
               <FiRefreshCw size={16} className={refreshing ? 'spinning' : ''} />
             </button>
@@ -327,7 +423,7 @@ function Dashboard() {
               onClick={() => navigate('/book-session')}
             >
               <FiPlus size={16} />
-              <span className="btn-text">{isMobile ? 'Book' : 'Book Session'}</span>
+              <span className="btn-text">{isMobile ? 'Book' : 'Book Study Session'}</span>
             </button>
           </div>
         </div>
@@ -338,7 +434,7 @@ function Dashboard() {
             <div className="alert-content">
               <div className="alert-icon">⏰</div>
               <div className="alert-text">
-                <strong>Next session starts {nextSessionInfo.timeString}</strong>
+                <strong>Next study session starts {nextSessionInfo.timeString}</strong>
                 <span>"{nextSessionInfo.session.goal}"</span>
               </div>
               {nextSessionInfo.canJoinEarly && (
@@ -346,8 +442,8 @@ function Dashboard() {
                   className="join-button"
                   onClick={() => handleJoinSession(nextSessionInfo.session.id)}
                 >
-                  <FiVideo size={14} />
-                  Join
+                  <FiUsers size={14} />
+                  Join Early
                 </button>
               )}
             </div>
@@ -355,13 +451,59 @@ function Dashboard() {
         )}
       </div>
 
-      {/* Stats Section */}
-      <Stats stats={stats} />
+      {/* Enhanced Stats Section */}
+      <div className="enhanced-stats-grid">
+        <div className="stat-card primary">
+          <div className="stat-icon">
+            <FiBook size={24} />
+          </div>
+          <div className="stat-content">
+            <h3>Total Sessions</h3>
+            <p>{stats.totalSessions}</p>
+            <span className="stat-subtitle">Study sessions completed</span>
+          </div>
+        </div>
+
+        <div className="stat-card success">
+          <div className="stat-icon">
+            <FiClock size={24} />
+          </div>
+          <div className="stat-content">
+            <h3>Focus Time</h3>
+            <p>{Math.floor(stats.totalMinutes / 60)}h {stats.totalMinutes % 60}m</p>
+            <span className="stat-subtitle">Total study hours</span>
+          </div>
+        </div>
+
+        <div className="stat-card warning">
+          <div className="stat-icon">
+            <FiTrendingUp size={24} />
+          </div>
+          <div className="stat-content">
+            <h3>Current Streak</h3>
+            <p>{stats.streak} days</p>
+            <span className="stat-subtitle">
+              {stats.streak > 0 ? 'Keep it up! 🔥' : 'Start your streak today!'}
+            </span>
+          </div>
+        </div>
+
+        <div className="stat-card secondary">
+          <div className="stat-icon">
+            <FiAward size={24} />
+          </div>
+          <div className="stat-content">
+            <h3>This Week</h3>
+            <p>{stats.thisWeek} sessions</p>
+            <span className="stat-subtitle">Weekly progress</span>
+          </div>
+        </div>
+      </div>
 
       {/* Sessions Section */}
       <div className="sessions-section">
         <div className="section-header">
-          <h2>Your Sessions</h2>
+          <h2>Your Study Sessions</h2>
           <div className="tab-switcher">
             <button 
               className={`tab-button ${activeTab === 'upcoming' ? 'active' : ''}`}
@@ -380,7 +522,7 @@ function Dashboard() {
               <FiClock size={16} />
               <span>Completed</span>
               {completedSessions.length > 0 && (
-                <span className="tab-badge">{completedSessions.length}</span>
+                <span className="tab-badge">{Math.min(completedSessions.length, 10)}</span>
               )}
             </button>
           </div>
@@ -402,9 +544,9 @@ function Dashboard() {
               </div>
             ) : (
               <div className="empty-state">
-                <div className="empty-icon">📅</div>
-                <h3>No upcoming sessions</h3>
-                <p>Ready to boost your productivity? Book your next focus session!</p>
+                <div className="empty-icon">📚</div>
+                <h3>No upcoming study sessions</h3>
+                <p>Ready to boost your preparation? Book your next focused study session!</p>
                 <button 
                   className="btn-primary"
                   onClick={() => navigate('/book-session')}
@@ -417,7 +559,7 @@ function Dashboard() {
           ) : (
             completedSessions.length > 0 ? (
               <div className="sessions-list">
-                {completedSessions.map(session => (
+                {completedSessions.slice(0, 10).map(session => (
                   <SessionCard 
                     key={session.id} 
                     session={session} 
@@ -430,7 +572,7 @@ function Dashboard() {
               <div className="empty-state">
                 <div className="empty-icon">🎯</div>
                 <h3>No completed sessions yet</h3>
-                <p>Start your first focus session to see your progress here!</p>
+                <p>Start your first study session to see your progress here!</p>
                 <button 
                   className="btn-secondary"
                   onClick={() => navigate('/book-session')}
@@ -444,9 +586,9 @@ function Dashboard() {
         </div>
       </div>
 
-      {/* Quick Actions */}
+      {/* Quick Actions for Students */}
       <div className="quick-actions">
-        <h3>Quick Actions</h3>
+        <h3>Quick Actions for Students</h3>
         <div className="actions-grid">
           {quickActions.map((action, index) => (
             <button 
@@ -455,34 +597,41 @@ function Dashboard() {
               onClick={action.action}
             >
               <action.icon size={isMobile ? 20 : 24} />
-              <span>{action.label}</span>
+              <div className="action-content">
+                <span className="action-label">{action.label}</span>
+                <span className="action-description">{action.description}</span>
+              </div>
             </button>
           ))}
         </div>
       </div>
 
-      {/* Recent Activity (Mobile Only) */}
-      {isMobile && completedSessions.length > 0 && (
-        <div className="recent-activity mobile-only">
-          <h3>Recent Activity</h3>
-          <div className="activity-list">
-            {completedSessions.slice(0, 3).map(session => (
-              <div key={session.id} className="activity-item">
-                <div className="activity-icon">✅</div>
-                <div className="activity-content">
-                  <p className="activity-title">Completed focus session</p>
-                  <p className="activity-time">
-                    {format(new Date(session.endTime || session.completedAt), 'MMM d, h:mm a')}
-                  </p>
-                </div>
-                <div className="activity-duration">
-                  {session.duration}min
-                </div>
-              </div>
-            ))}
+      {/* Study Tips for India Students */}
+      <div className="study-tips">
+        <h3>Study Tips for Success</h3>
+        <div className="tips-grid">
+          <div className="tip-card">
+            <div className="tip-icon">🧠</div>
+            <h4>Pomodoro Technique</h4>
+            <p>25-min focused study + 5-min break = Better retention</p>
+          </div>
+          <div className="tip-card">
+            <div className="tip-icon">🎯</div>
+            <h4>Set Clear Goals</h4>
+            <p>Define what you want to achieve in each session</p>
+          </div>
+          <div className="tip-card">
+            <div className="tip-icon">👥</div>
+            <h4>Study Partners</h4>
+            <p>Accountability partners help maintain consistency</p>
+          </div>
+          <div className="tip-card">
+            <div className="tip-icon">📊</div>
+            <h4>Track Progress</h4>
+            <p>Monitor your study hours and streak daily</p>
           </div>
         </div>
-      )}
+      </div>
     </div>
   );
 }

@@ -1,20 +1,24 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
-import { FiPlay, FiPause, FiRotateCcw, FiVolume2, FiVolumeX } from 'react-icons/fi';
+import { FiPlay, FiPause, FiVolume2, FiVolumeX } from 'react-icons/fi';
 
-function SessionTimer({ duration = 50, onComplete, autoStart = true, showControls = true, sessionId }) {
-  // Use refs to persist timer state across re-renders and tab switches
+function SessionTimer({ 
+  duration = 50, 
+  onComplete, 
+  autoStart = false, 
+  sessionId,
+  startTime = null
+}) {
   const timerStateRef = useRef({
     timeLeft: duration * 60,
-    isRunning: autoStart,
+    isRunning: false,
     isCompleted: false,
-    startTime: Date.now(),
-    totalElapsed: 0,
+    startTime: null,
     lastUpdate: Date.now()
   });
 
   const [timeLeft, setTimeLeft] = useState(timerStateRef.current.timeLeft);
-  const [isRunning, setIsRunning] = useState(timerStateRef.current.isRunning);
-  const [isCompleted, setIsCompleted] = useState(timerStateRef.current.isCompleted);
+  const [isRunning, setIsRunning] = useState(false);
+  const [isCompleted, setIsCompleted] = useState(false);
   const [soundEnabled, setSoundEnabled] = useState(
     localStorage.getItem('focusmate_sound_enabled') !== 'false'
   );
@@ -34,86 +38,15 @@ function SessionTimer({ duration = 50, onComplete, autoStart = true, showControl
     }
   }, []);
 
-  // Persist timer state to localStorage
-  const saveTimerState = useCallback(() => {
-    if (sessionId) {
-      const state = {
-        ...timerStateRef.current,
-        lastUpdate: Date.now()
-      };
-      try {
-        localStorage.setItem(`focusmate_timer_${sessionId}`, JSON.stringify(state));
-      } catch (error) {
-        console.warn('Failed to save timer state:', error);
-      }
-    }
-  }, [sessionId]);
-
-  // Load timer state from localStorage
-  const loadTimerState = useCallback(() => {
-    if (sessionId) {
-      try {
-        const saved = localStorage.getItem(`focusmate_timer_${sessionId}`);
-        if (saved) {
-          const state = JSON.parse(saved);
-          const timeSinceLastUpdate = Date.now() - (state.lastUpdate || Date.now());
-          
-          if (state.isRunning && !state.isCompleted && timeSinceLastUpdate < 5 * 60 * 1000) {
-            // Only restore if less than 5 minutes have passed
-            const secondsElapsed = Math.floor(timeSinceLastUpdate / 1000);
-            const newTimeLeft = Math.max(0, state.timeLeft - secondsElapsed);
-            
-            timerStateRef.current = {
-              ...state,
-              timeLeft: newTimeLeft,
-              isCompleted: newTimeLeft <= 0,
-              lastUpdate: Date.now()
-            };
-            
-            setTimeLeft(timerStateRef.current.timeLeft);
-            setIsRunning(timerStateRef.current.isRunning && !timerStateRef.current.isCompleted);
-            setIsCompleted(timerStateRef.current.isCompleted);
-            
-            return true; // State was restored
-          }
-        }
-      } catch (error) {
-        console.warn('Failed to load timer state:', error);
-      }
-    }
-    return false; // State was not restored
-  }, [sessionId]);
-
-  // Initialize timer
+  // Auto-start timer when both partners connect
   useEffect(() => {
-    initAudioContext();
-    
-    // Try to load saved state, otherwise use defaults
-    const wasRestored = loadTimerState();
-    
-    if (!wasRestored) {
-      // Reset to initial state
-      timerStateRef.current = {
-        timeLeft: duration * 60,
-        isRunning: autoStart,
-        isCompleted: false,
-        startTime: Date.now(),
-        totalElapsed: 0,
-        lastUpdate: Date.now()
-      };
-      
-      setTimeLeft(timerStateRef.current.timeLeft);
-      setIsRunning(timerStateRef.current.isRunning);
-      setIsCompleted(false);
+    if (autoStart && startTime && !isRunning && !isCompleted) {
+      console.log('Auto-starting timer - both partners connected');
+      timerStateRef.current.isRunning = true;
+      timerStateRef.current.startTime = startTime;
+      setIsRunning(true);
     }
-    
-    return () => {
-      if (intervalRef.current) {
-        clearInterval(intervalRef.current);
-      }
-      saveTimerState();
-    };
-  }, [duration, autoStart, sessionId, loadTimerState, saveTimerState, initAudioContext]);
+  }, [autoStart, startTime, isRunning, isCompleted]);
 
   // Timer logic
   useEffect(() => {
@@ -122,7 +55,6 @@ function SessionTimer({ duration = 50, onComplete, autoStart = true, showControl
         setTimeLeft(prevTime => {
           const newTime = prevTime - 1;
           
-          // Update ref state
           timerStateRef.current.timeLeft = newTime;
           timerStateRef.current.lastUpdate = Date.now();
           
@@ -150,26 +82,11 @@ function SessionTimer({ duration = 50, onComplete, autoStart = true, showControl
               playCompletionSound();
             }
             
-            // Clear saved state when completed
-            if (sessionId) {
-              try {
-                localStorage.removeItem(`focusmate_timer_${sessionId}`);
-              } catch (error) {
-                console.warn('Failed to clear timer state:', error);
-              }
-            }
-            
-            // Call completion callback
             if (onComplete) {
               setTimeout(() => onComplete(), 1000);
             }
             
             return 0;
-          }
-          
-          // Save state periodically
-          if (newTime % 30 === 0) { // Every 30 seconds
-            setTimeout(saveTimerState, 0);
           }
           
           return newTime;
@@ -187,36 +104,30 @@ function SessionTimer({ duration = 50, onComplete, autoStart = true, showControl
         clearInterval(intervalRef.current);
       }
     };
-  }, [isRunning, timeLeft, isCompleted, onComplete, soundEnabled, sessionId, saveTimerState]);
+  }, [isRunning, timeLeft, isCompleted, onComplete, soundEnabled]);
 
-  // Handle page visibility changes
+  // Handle page visibility changes to keep timer in sync
   useEffect(() => {
     const handleVisibilityChange = () => {
-      if (!document.hidden && isRunning) {
-        // Page became visible again, sync timer
-        const savedState = sessionId ? localStorage.getItem(`focusmate_timer_${sessionId}`) : null;
-        if (savedState) {
-          try {
-            const state = JSON.parse(savedState);
-            const timeSinceLastUpdate = Date.now() - (state.lastUpdate || Date.now());
-            if (timeSinceLastUpdate > 2000) { // More than 2 seconds difference
-              const secondsElapsed = Math.floor(timeSinceLastUpdate / 1000);
-              const newTimeLeft = Math.max(0, state.timeLeft - secondsElapsed);
-              
-              if (newTimeLeft !== timeLeft) {
-                setTimeLeft(newTimeLeft);
-                timerStateRef.current.timeLeft = newTimeLeft;
-                
-                if (newTimeLeft <= 0 && !isCompleted) {
-                  setIsCompleted(true);
-                  setIsRunning(false);
-                  timerStateRef.current.isCompleted = true;
-                  timerStateRef.current.isRunning = false;
-                }
-              }
+      if (!document.hidden && isRunning && timerStateRef.current.startTime) {
+        // Recalculate time based on actual elapsed time
+        const now = Date.now();
+        const elapsed = Math.floor((now - new Date(timerStateRef.current.startTime).getTime()) / 1000);
+        const newTimeLeft = Math.max(0, totalSeconds - elapsed);
+        
+        if (newTimeLeft !== timeLeft) {
+          setTimeLeft(newTimeLeft);
+          timerStateRef.current.timeLeft = newTimeLeft;
+          
+          if (newTimeLeft <= 0 && !isCompleted) {
+            setIsCompleted(true);
+            setIsRunning(false);
+            timerStateRef.current.isCompleted = true;
+            timerStateRef.current.isRunning = false;
+            
+            if (onComplete) {
+              onComplete();
             }
-          } catch (error) {
-            console.warn('Failed to sync timer state:', error);
           }
         }
       }
@@ -224,20 +135,7 @@ function SessionTimer({ duration = 50, onComplete, autoStart = true, showControl
 
     document.addEventListener('visibilitychange', handleVisibilityChange);
     return () => document.removeEventListener('visibilitychange', handleVisibilityChange);
-  }, [isRunning, timeLeft, isCompleted, sessionId]);
-
-  // Save state when component unmounts or page unloads
-  useEffect(() => {
-    const handleBeforeUnload = () => {
-      saveTimerState();
-    };
-
-    window.addEventListener('beforeunload', handleBeforeUnload);
-    return () => {
-      window.removeEventListener('beforeunload', handleBeforeUnload);
-      saveTimerState();
-    };
-  }, [saveTimerState]);
+  }, [isRunning, timeLeft, isCompleted, totalSeconds, onComplete]);
 
   const playNotificationSound = useCallback((frequency = 800, volume = 0.3) => {
     if (!soundEnabled || !audioContextRef.current) return;
@@ -314,34 +212,12 @@ function SessionTimer({ duration = 50, onComplete, autoStart = true, showControl
     timerStateRef.current.isRunning = newRunningState;
     timerStateRef.current.lastUpdate = Date.now();
     
-    setIsRunning(newRunningState);
-    saveTimerState();
-  };
-
-  const resetTimer = () => {
-    if (window.confirm('Are you sure you want to reset the timer?')) {
-      timerStateRef.current = {
-        timeLeft: totalSeconds,
-        isRunning: autoStart,
-        isCompleted: false,
-        startTime: Date.now(),
-        totalElapsed: 0,
-        lastUpdate: Date.now()
-      };
-      
-      setTimeLeft(totalSeconds);
-      setIsRunning(autoStart);
-      setIsCompleted(false);
-      
-      // Clear saved state
-      if (sessionId) {
-        try {
-          localStorage.removeItem(`focusmate_timer_${sessionId}`);
-        } catch (error) {
-          console.warn('Failed to clear timer state:', error);
-        }
-      }
+    // Set start time if not set
+    if (newRunningState && !timerStateRef.current.startTime) {
+      timerStateRef.current.startTime = new Date();
     }
+    
+    setIsRunning(newRunningState);
   };
 
   const toggleSound = () => {
@@ -368,33 +244,21 @@ function SessionTimer({ duration = 50, onComplete, autoStart = true, showControl
   const getStatusMessage = () => {
     if (isCompleted) return 'Session Complete! 🎉';
     if (!isRunning && timeLeft < totalSeconds) return 'Paused';
-    if (!isRunning) return 'Ready to start';
+    if (!isRunning) return autoStart ? 'Waiting for partner...' : 'Ready to start';
     if (timeLeft <= 60) return 'Almost done!';
     if (timeLeft <= 300) return 'Final sprint!';
     return 'Stay focused!';
   };
 
-  const getMotivationalTip = () => {
-    const tips = [
-      "💡 Remove distractions from your workspace",
-      "🧘 Take deep breaths to stay calm and focused", 
-      "📝 Write down any distracting thoughts",
-      "🎵 Use background music to maintain concentration",
-      "💪 Stay hydrated and maintain good posture",
-      "🎯 Break large tasks into smaller chunks",
-      "⏰ Use the Pomodoro technique for better focus",
-      "🚫 Turn off non-essential notifications"
-    ];
-    
-    const tipIndex = Math.floor((totalSeconds - timeLeft) / 300) % tips.length;
-    return tips[tipIndex];
-  };
+  // Initialize audio context on component mount
+  useEffect(() => {
+    initAudioContext();
+  }, [initAudioContext]);
 
   return (
     <div className="timer-widget">
       <div className="timer-circle">
         <svg className="timer-svg" viewBox="0 0 200 200">
-          {/* Background circle */}
           <circle
             className="timer-circle-bg"
             cx="100"
@@ -404,7 +268,6 @@ function SessionTimer({ duration = 50, onComplete, autoStart = true, showControl
             fill="none"
             stroke="#e5e7eb"
           />
-          {/* Progress circle */}
           <circle
             className="timer-circle-progress"
             cx="100"
@@ -452,8 +315,8 @@ function SessionTimer({ duration = 50, onComplete, autoStart = true, showControl
         </div>
       </div>
       
-      {showControls && (
-        <div className="timer-controls">
+      <div className="timer-controls">
+        {!autoStart && (
           <button 
             onClick={toggleTimer} 
             className={`timer-button primary ${isCompleted ? 'disabled' : ''}`}
@@ -463,25 +326,16 @@ function SessionTimer({ duration = 50, onComplete, autoStart = true, showControl
             {isRunning ? <FiPause size={16} /> : <FiPlay size={16} />}
             <span>{isRunning ? 'Pause' : 'Start'}</span>
           </button>
-          
-          <button 
-            onClick={resetTimer} 
-            className="timer-button secondary"
-            title="Reset timer"
-          >
-            <FiRotateCcw size={16} />
-            <span>Reset</span>
-          </button>
-          
-          <button 
-            onClick={toggleSound} 
-            className={`timer-button ${soundEnabled ? 'active' : 'muted'}`}
-            title={soundEnabled ? 'Disable sound' : 'Enable sound'}
-          >
-            {soundEnabled ? <FiVolume2 size={16} /> : <FiVolumeX size={16} />}
-          </button>
-        </div>
-      )}
+        )}
+        
+        <button 
+          onClick={toggleSound} 
+          className={`timer-button ${soundEnabled ? 'active' : 'muted'}`}
+          title={soundEnabled ? 'Disable sound' : 'Enable sound'}
+        >
+          {soundEnabled ? <FiVolume2 size={16} /> : <FiVolumeX size={16} />}
+        </button>
+      </div>
       
       {/* Progress bar for mobile */}
       <div className="timer-progress-bar mobile-only">
@@ -497,9 +351,8 @@ function SessionTimer({ duration = 50, onComplete, autoStart = true, showControl
       
       {/* Motivational tip */}
       <div className="timer-tips">
-        <h4>🎯 Focus Tip</h4>
         <div className="tip active">
-          <span>{getMotivationalTip()}</span>
+          <span>💡 Stay focused and maintain deep concentration</span>
         </div>
       </div>
     </div>

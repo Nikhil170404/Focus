@@ -1,12 +1,11 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
-import { doc, getDoc, updateDoc, onSnapshot, collection, addDoc, query, where, orderBy, limit } from 'firebase/firestore';
-import { ref, push, onValue, off, serverTimestamp } from 'firebase/database';
+import { doc, getDoc, updateDoc, onSnapshot, serverTimestamp } from 'firebase/firestore';
+import { ref, push, onValue, off, serverTimestamp as rtServerTimestamp } from 'firebase/database';
 import { db, realtimeDb } from '../../config/firebase';
 import { useAuth } from '../../hooks/useAuth';
 import SessionTimer from './SessionTimer';
-import SessionChat from './SessionChat';
-import { FiMic, FiMicOff, FiVideo, FiVideoOff, FiPhoneOff, FiMaximize2, FiMessageCircle, FiSettings, FiMinimize2, FiRefreshCw } from 'react-icons/fi';
+import { FiMic, FiMicOff, FiVideo, FiVideoOff, FiPhoneOff, FiMaximize2, FiMinimize2, FiUsers, FiRefreshCw } from 'react-icons/fi';
 import toast from 'react-hot-toast';
 
 function VideoSession() {
@@ -23,18 +22,17 @@ function VideoSession() {
   const [remoteStream, setRemoteStream] = useState(null);
   const [isAudioEnabled, setIsAudioEnabled] = useState(true);
   const [isVideoEnabled, setIsVideoEnabled] = useState(true);
-  const [activeTab, setActiveTab] = useState('timer');
   const [loading, setLoading] = useState(true);
   const [connectionStatus, setConnectionStatus] = useState('Initializing...');
   const [session, setSession] = useState(null);
-  const [isSidebarOpen, setIsSidebarOpen] = useState(window.innerWidth > 1024);
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [mediaError, setMediaError] = useState(null);
   const [partner, setPartner] = useState(null);
   const [isInitiator, setIsInitiator] = useState(false);
-  const [reconnectAttempts, setReconnectAttempts] = useState(0);
+  const [bothConnected, setBothConnected] = useState(false);
+  const [sessionStartTime, setSessionStartTime] = useState(null);
 
-  // Enhanced WebRTC configuration for production
+  // Enhanced WebRTC configuration
   const pcConfig = {
     iceServers: [
       { urls: 'stun:stun.l.google.com:19302' },
@@ -42,7 +40,6 @@ function VideoSession() {
       { urls: 'stun:stun2.l.google.com:19302' },
       { urls: 'stun:stun3.l.google.com:19302' },
       { urls: 'stun:stun4.l.google.com:19302' },
-      // Add more reliable STUN servers
       { urls: 'stun:stun.stunprotocol.org:3478' },
       { urls: 'stun:stun.services.mozilla.com' }
     ],
@@ -53,21 +50,16 @@ function VideoSession() {
 
   const cleanup = useCallback(() => {
     try {
-      // Stop local stream
       if (localStreamRef.current) {
-        localStreamRef.current.getTracks().forEach(track => {
-          track.stop();
-        });
+        localStreamRef.current.getTracks().forEach(track => track.stop());
         localStreamRef.current = null;
       }
 
-      // Close peer connection
       if (peerConnectionRef.current) {
         peerConnectionRef.current.close();
         peerConnectionRef.current = null;
       }
 
-      // Remove Firebase listeners
       if (signalListenerRef.current && sessionId) {
         const signalRef = ref(realtimeDb, `sessions/${sessionId}/signals`);
         off(signalRef, 'value', signalListenerRef.current);
@@ -87,7 +79,7 @@ function VideoSession() {
     initializeSession();
     
     const handleResize = () => {
-      setIsSidebarOpen(window.innerWidth > 1024);
+      // Handle any resize logic if needed
     };
     
     const handleBeforeUnload = () => {
@@ -119,7 +111,6 @@ function VideoSession() {
       setLoading(true);
       setMediaError(null);
 
-      // Get session data
       const sessionDoc = await getDoc(doc(db, 'sessions', sessionId));
       
       if (!sessionDoc.exists()) {
@@ -131,7 +122,6 @@ function VideoSession() {
       const sessionData = { id: sessionDoc.id, ...sessionDoc.data() };
       setSession(sessionData);
       
-      // Check if user is authorized for this session
       if (sessionData.userId !== user.uid && sessionData.partnerId !== user.uid) {
         toast.error('You are not authorized to join this session');
         navigate('/dashboard');
@@ -140,11 +130,21 @@ function VideoSession() {
 
       setIsInitiator(sessionData.userId === user.uid);
       
-      // Listen for session updates
+      // Listen for session updates to detect when both users are connected
       const unsubscribe = onSnapshot(doc(db, 'sessions', sessionId), (doc) => {
         if (doc.exists()) {
           const updatedData = { id: doc.id, ...doc.data() };
           setSession(updatedData);
+          
+          // Check if both users are connected
+          const hasBothUsers = updatedData.userId && updatedData.partnerId;
+          const wasAlreadyConnected = bothConnected;
+          
+          if (hasBothUsers && !wasAlreadyConnected) {
+            setBothConnected(true);
+            setSessionStartTime(new Date());
+            toast.success('Both partners connected! Timer starting...');
+          }
           
           if (updatedData.partnerId && updatedData.partnerId !== user.uid) {
             setPartner({
@@ -156,10 +156,7 @@ function VideoSession() {
         }
       });
 
-      // Initialize media first
       await setupLocalStream();
-      
-      // Then handle partner connection
       await handlePartnerConnection(sessionData);
 
     } catch (error) {
@@ -180,8 +177,13 @@ function VideoSession() {
         });
         setConnectionStatus('Connecting to partner...');
         await setupWebRTCConnection();
+        
+        // If both users already exist, mark as connected
+        if (sessionData.userId && sessionData.partnerId) {
+          setBothConnected(true);
+          setSessionStartTime(new Date());
+        }
       } else {
-        // Wait for partner to join
         setConnectionStatus('Waiting for partner...');
         await findOrWaitForPartner(sessionData);
       }
@@ -198,12 +200,10 @@ function VideoSession() {
     try {
       setConnectionStatus('Accessing camera and microphone...');
       
-      // Check if getUserMedia is supported
       if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
         throw new Error('Your browser does not support camera and microphone access');
       }
 
-      // Simplified constraints for better compatibility
       const constraints = {
         video: {
           width: { ideal: 640, max: 1280 },
@@ -220,10 +220,8 @@ function VideoSession() {
       localStreamRef.current = stream;
       setLocalStream(stream);
       
-      // Ensure video element is properly set
       if (localVideoRef.current) {
         localVideoRef.current.srcObject = stream;
-        // Force video to play
         localVideoRef.current.onloadedmetadata = () => {
           localVideoRef.current.play().catch(e => console.log('Video play failed:', e));
         };
@@ -231,18 +229,15 @@ function VideoSession() {
       
       setConnectionStatus('Media ready');
       setMediaError(null);
-      toast.success('Camera and microphone access granted!');
       
     } catch (error) {
       console.error('Media access error:', error);
       let errorMessage = 'Camera access issue: ';
       
       if (error.name === 'NotAllowedError') {
-        errorMessage = 'Please click "Allow" when prompted for camera access, then refresh the page.';
+        errorMessage = 'Please allow camera access and refresh the page.';
       } else if (error.name === 'NotFoundError') {
         errorMessage = 'No camera found. Please connect a camera and try again.';
-      } else if (error.name === 'NotSupportedError') {
-        errorMessage = 'Your browser does not support video calling. Please use Chrome, Firefox, or Safari.';
       } else {
         errorMessage = `Media error: ${error.message}`;
       }
@@ -255,55 +250,11 @@ function VideoSession() {
 
   const findOrWaitForPartner = async (sessionData) => {
     try {
-      const partnerQuery = query(
-        collection(db, 'sessions'),
-        where('startTime', '==', sessionData.startTime),
-        where('duration', '==', sessionData.duration),
-        where('status', 'in', ['scheduled', 'active']),
-        where('userId', '!=', user.uid),
-        orderBy('createdAt', 'asc'),
-        limit(1)
-      );
-
-      const unsubscribe = onSnapshot(partnerQuery, async (snapshot) => {
-        if (!snapshot.empty) {
-          const partnerSession = snapshot.docs[0];
-          const partnerData = partnerSession.data();
-          
-          // Update both sessions with partner info
-          await Promise.all([
-            updateDoc(doc(db, 'sessions', sessionId), {
-              partnerId: partnerData.userId,
-              partnerName: partnerData.userName,
-              partnerPhoto: partnerData.userPhoto,
-              status: 'active'
-            }),
-            updateDoc(doc(db, 'sessions', partnerSession.id), {
-              partnerId: user.uid,
-              partnerName: user.displayName,
-              partnerPhoto: user.photoURL,
-              status: 'active'
-            })
-          ]);
-
-          setPartner({
-            id: partnerData.userId,
-            name: partnerData.userName,
-            photo: partnerData.userPhoto
-          });
-
-          toast.success(`Connected with ${partnerData.userName}! 🤝`);
-          setConnectionStatus('Connecting to partner...');
-          await setupWebRTCConnection();
-          unsubscribe();
-        }
-      });
-
-      // Update session status
+      // Update session status and user info
       await updateDoc(doc(db, 'sessions', sessionId), {
         status: 'active',
         startedAt: serverTimestamp(),
-        userName: user.displayName,
+        userName: user.displayName || user.email,
         userPhoto: user.photoURL
       });
 
@@ -321,15 +272,12 @@ function VideoSession() {
 
       setConnectionStatus('Setting up connection...');
       
-      // Create peer connection
       peerConnectionRef.current = new RTCPeerConnection(pcConfig);
       
-      // Add local stream tracks
       localStreamRef.current.getTracks().forEach(track => {
         peerConnectionRef.current.addTrack(track, localStreamRef.current);
       });
 
-      // Handle remote stream
       peerConnectionRef.current.ontrack = (event) => {
         console.log('Received remote stream');
         const [remoteStream] = event.streams;
@@ -340,7 +288,6 @@ function VideoSession() {
         setConnectionStatus('Connected');
       };
 
-      // Handle ICE candidates
       peerConnectionRef.current.onicecandidate = (event) => {
         if (event.candidate) {
           sendSignal({
@@ -352,7 +299,6 @@ function VideoSession() {
         }
       };
 
-      // Handle connection state changes
       peerConnectionRef.current.onconnectionstatechange = () => {
         const state = peerConnectionRef.current?.connectionState;
         console.log('Connection state:', state);
@@ -360,15 +306,12 @@ function VideoSession() {
         switch (state) {
           case 'connected':
             setConnectionStatus('Connected');
-            setReconnectAttempts(0);
             break;
           case 'disconnected':
             setConnectionStatus('Reconnecting...');
-            handleReconnection();
             break;
           case 'failed':
             setConnectionStatus('Connection failed');
-            handleConnectionFailure();
             break;
           case 'connecting':
             setConnectionStatus('Connecting...');
@@ -378,20 +321,8 @@ function VideoSession() {
         }
       };
 
-      // Handle ICE connection state
-      peerConnectionRef.current.oniceconnectionstatechange = () => {
-        const state = peerConnectionRef.current?.iceConnectionState;
-        console.log('ICE connection state:', state);
-        
-        if (state === 'failed' || state === 'disconnected') {
-          handleReconnection();
-        }
-      };
-
-      // Listen for signaling data
       listenForSignals();
 
-      // Create offer if initiator
       if (isInitiator) {
         console.log('Creating offer as initiator');
         const offer = await peerConnectionRef.current.createOffer({
@@ -415,30 +346,6 @@ function VideoSession() {
     }
   };
 
-  const handleReconnection = async () => {
-    if (reconnectAttempts >= 3) {
-      setConnectionStatus('Connection failed - please refresh');
-      toast.error('Connection failed. Please refresh the page.');
-      return;
-    }
-
-    setReconnectAttempts(prev => prev + 1);
-    setConnectionStatus(`Reconnecting... (${reconnectAttempts + 1}/3)`);
-    
-    try {
-      if (peerConnectionRef.current) {
-        await peerConnectionRef.current.restartIce();
-      }
-    } catch (error) {
-      console.error('Reconnection failed:', error);
-    }
-  };
-
-  const handleConnectionFailure = () => {
-    setConnectionStatus('Connection failed');
-    toast.error('Video connection failed. You can still use chat and timer.');
-  };
-
   const sendSignal = async (data) => {
     try {
       if (!sessionId) return;
@@ -446,7 +353,7 @@ function VideoSession() {
       const signalRef = ref(realtimeDb, `sessions/${sessionId}/signals`);
       await push(signalRef, {
         ...data,
-        timestamp: serverTimestamp()
+        timestamp: rtServerTimestamp()
       });
     } catch (error) {
       console.error('Error sending signal:', error);
@@ -464,7 +371,7 @@ function VideoSession() {
         const signalEntries = Object.entries(signals)
           .filter(([_, signal]) => signal.from !== user.uid)
           .sort((a, b) => (b[1].timestamp || 0) - (a[1].timestamp || 0))
-          .slice(0, 5); // Process only recent signals
+          .slice(0, 5);
 
         for (const [_, signal] of signalEntries) {
           try {
@@ -563,7 +470,8 @@ function VideoSession() {
         if (sessionId) {
           await updateDoc(doc(db, 'sessions', sessionId), {
             status: 'completed',
-            endedAt: serverTimestamp()
+            endedAt: serverTimestamp(),
+            actualDuration: Math.floor((new Date() - sessionStartTime) / 60000) || session?.duration
           });
         }
 
@@ -582,26 +490,6 @@ function VideoSession() {
     setTimeout(() => {
       endSession();
     }, 3000);
-  };
-
-  const toggleSidebar = () => {
-    setIsSidebarOpen(!isSidebarOpen);
-  };
-
-  const retryConnection = async () => {
-    setReconnectAttempts(0);
-    setConnectionStatus('Retrying...');
-    
-    try {
-      cleanup();
-      await setupLocalStream();
-      if (partner) {
-        await setupWebRTCConnection();
-      }
-    } catch (error) {
-      console.error('Retry failed:', error);
-      toast.error('Retry failed. Please refresh the page.');
-    }
   };
 
   if (loading) {
@@ -640,19 +528,35 @@ function VideoSession() {
   return (
     <div className={`video-session-page ${isFullscreen ? 'fullscreen' : ''}`}>
       <div className="video-container">
-        {/* Mobile Header */}
-        <div className="video-header mobile-only">
-          <div className="session-info-mobile">
+        {/* Session Header */}
+        <div className="session-header">
+          <div className="session-info">
             <h3>{session?.goal || 'Focus Session'}</h3>
-            <span className={`connection-status ${connectionStatus.toLowerCase().replace(/\s+/g, '-')}`}>
-              {connectionStatus}
-            </span>
+            <div className="session-status">
+              <span className={`status-indicator ${connectionStatus.toLowerCase().replace(/\s+/g, '-')}`}>
+                {connectionStatus}
+              </span>
+              {partner && (
+                <span className="partner-info">
+                  <FiUsers size={14} />
+                  with {partner.name}
+                </span>
+              )}
+            </div>
           </div>
-          <button className="sidebar-toggle-mobile" onClick={toggleSidebar}>
-            <FiMessageCircle size={20} />
-          </button>
+          
+          <div className="session-actions">
+            <button 
+              className="fullscreen-btn"
+              onClick={toggleFullscreen}
+              title={isFullscreen ? 'Exit fullscreen' : 'Enter fullscreen'}
+            >
+              {isFullscreen ? <FiMinimize2 size={18} /> : <FiMaximize2 size={18} />}
+            </button>
+          </div>
         </div>
 
+        {/* Videos Grid */}
         <div className="videos-grid">
           {/* Local Video */}
           <div className="video-box local-video">
@@ -694,12 +598,6 @@ function VideoSession() {
               <div className="video-connecting">
                 <div className="pulse-loader"></div>
                 <p>{connectionStatus}</p>
-                {connectionStatus.includes('failed') && (
-                  <button onClick={retryConnection} className="retry-btn">
-                    <FiRefreshCw size={16} />
-                    Retry Connection
-                  </button>
-                )}
               </div>
             ) : !remoteStream ? (
               <div className="video-disabled">
@@ -737,118 +635,38 @@ function VideoSession() {
           >
             <FiPhoneOff size={20} />
           </button>
-
-          <button
-            className="control-button desktop-only"
-            onClick={toggleFullscreen}
-            title={isFullscreen ? 'Exit fullscreen' : 'Enter fullscreen'}
-          >
-            {isFullscreen ? <FiMinimize2 size={20} /> : <FiMaximize2 size={20} />}
-          </button>
-
-          <button
-            className="control-button desktop-only"
-            onClick={toggleSidebar}
-            title="Toggle sidebar"
-          >
-            <FiMessageCircle size={20} />
-          </button>
         </div>
       </div>
 
-      {/* Sidebar */}
-      <div className={`session-sidebar ${isSidebarOpen ? 'open' : ''}`}>
-        {/* Mobile Only Close Button */}
-        <div className="sidebar-header mobile-only">
-          <h3>Session Controls</h3>
-          <button className="close-sidebar" onClick={toggleSidebar} aria-label="Close sidebar">
-            ×
-          </button>
-        </div>
-
-        <div className="sidebar-tabs">
-          <button
-            className={`tab-button ${activeTab === 'timer' ? 'active' : ''}`}
-            onClick={() => setActiveTab('timer')}
-          >
-            <span className="tab-icon">⏱️</span>
-            <span className="tab-text">Timer</span>
-          </button>
-          <button
-            className={`tab-button ${activeTab === 'chat' ? 'active' : ''}`}
-            onClick={() => setActiveTab('chat')}
-          >
-            <span className="tab-icon">💬</span>
-            <span className="tab-text">Chat</span>
-          </button>
-          <button
-            className={`tab-button ${activeTab === 'goals' ? 'active' : ''}`}
-            onClick={() => setActiveTab('goals')}
-          >
-            <span className="tab-icon">🎯</span>
-            <span className="tab-text">Goals</span>
-          </button>
-        </div>
-
-        <div className="sidebar-panel">
-          {activeTab === 'timer' && (
-            <div className="timer-panel">
-              <SessionTimer 
-                duration={session?.duration || 50} 
-                onComplete={onTimerComplete}
-                sessionId={sessionId}
-              />
-              <div className="session-info">
-                <h4>Session Details</h4>
-                <div className="info-item">
-                  <span>Duration:</span>
-                  <span>{session?.duration || 50} minutes</span>
-                </div>
-                <div className="info-item">
-                  <span>Status:</span>
-                  <span className={`status ${connectionStatus.toLowerCase().replace(/\s+/g, '-')}`}>
-                    {connectionStatus}
-                  </span>
-                </div>
-                {partner && (
-                  <div className="info-item">
-                    <span>Partner:</span>
-                    <span>{partner.name}</span>
-                  </div>
-                )}
-              </div>
-            </div>
-          )}
-          
-          {activeTab === 'chat' && (
-            <SessionChat 
-              sessionId={sessionId} 
-              userId={user?.uid} 
-              userName={user?.displayName || 'You'}
-              partnerId={partner?.id}
-              partnerName={partner?.name}
-            />
-          )}
-          
-          {activeTab === 'goals' && (
-            <div className="goals-panel">
-              <div className="goal-section">
-                <h3>Session Goal</h3>
-                <div className="goal-card">
-                  <p>{session?.goal || 'Focus on your tasks and stay productive'}</p>
-                </div>
-              </div>
-            </div>
-          )}
-        </div>
-        
-        {/* Mobile sidebar overlay */}
-        {isSidebarOpen && (
-          <div 
-            className="sidebar-overlay mobile-only"
-            onClick={toggleSidebar}
+      {/* Simple Timer Sidebar */}
+      <div className="timer-sidebar">
+        <div className="timer-container">
+          <h3>Focus Timer</h3>
+          <SessionTimer 
+            duration={session?.duration || 50} 
+            onComplete={onTimerComplete}
+            sessionId={sessionId}
+            autoStart={bothConnected}
+            startTime={sessionStartTime}
           />
-        )}
+          
+          <div className="session-details">
+            <div className="detail-item">
+              <span>Goal:</span>
+              <p>{session?.goal || 'Stay focused and productive'}</p>
+            </div>
+            <div className="detail-item">
+              <span>Duration:</span>
+              <p>{session?.duration || 50} minutes</p>
+            </div>
+            {bothConnected && (
+              <div className="detail-item">
+                <span>Status:</span>
+                <p className="status-active">Session Active</p>
+              </div>
+            )}
+          </div>
+        </div>
       </div>
     </div>
   );

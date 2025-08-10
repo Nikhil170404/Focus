@@ -1,10 +1,10 @@
 import React, { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { collection, addDoc, query, where, getDocs } from 'firebase/firestore';
+import { collection, addDoc, query, where, getDocs, updateDoc, doc } from 'firebase/firestore';
 import { db } from '../../config/firebase';
 import { useAuth } from '../../hooks/useAuth';
 import { addDays, addHours, format, startOfDay, endOfDay, isToday, isTomorrow } from 'date-fns';
-import { FiCalendar, FiClock, FiTarget, FiUsers, FiCheck, FiArrowLeft, FiArrowRight } from 'react-icons/fi';
+import { FiCalendar, FiClock, FiTarget, FiUsers, FiCheck, FiArrowLeft, FiArrowRight, FiBook } from 'react-icons/fi';
 import { CSSLoadingSpinner } from '../Common/LoadingSpinner';
 import toast from 'react-hot-toast';
 
@@ -14,7 +14,8 @@ function SessionBooking() {
   const [selectedDate, setSelectedDate] = useState(new Date());
   const [selectedTime, setSelectedTime] = useState('');
   const [duration, setDuration] = useState(50);
-  const [taskMode, setTaskMode] = useState('desk');
+  const [studyMode, setStudyMode] = useState('focused');
+  const [subject, setSubject] = useState('');
   const [goal, setGoal] = useState('');
   const [availableSlots, setAvailableSlots] = useState([]);
   const [loading, setLoading] = useState(false);
@@ -22,6 +23,63 @@ function SessionBooking() {
   const [currentStep, setCurrentStep] = useState(1);
   const [dateRange, setDateRange] = useState({ start: 0, end: 6 });
   const [validationErrors, setValidationErrors] = useState({});
+
+  // India-specific study subjects
+  const subjectOptions = [
+    'Physics', 'Chemistry', 'Mathematics', 'Biology',
+    'English', 'Hindi', 'Computer Science', 'Economics',
+    'History', 'Geography', 'Political Science', 'Sanskrit',
+    'Accountancy', 'Business Studies', 'Psychology',
+    'Mixed Subjects', 'Revision', 'Mock Test', 'Other'
+  ];
+
+  // India-focused study modes
+  const studyModes = [
+    {
+      value: 'focused',
+      icon: '🎯',
+      name: 'Deep Focus',
+      description: 'Intense concentration on difficult topics'
+    },
+    {
+      value: 'revision',
+      icon: '📝',
+      name: 'Revision Mode',
+      description: 'Review and practice problems'
+    },
+    {
+      value: 'memorization',
+      icon: '🧠',
+      name: 'Memory Work',
+      description: 'Formulas, facts, and definitions'
+    },
+    {
+      value: 'practice',
+      icon: '✍️',
+      name: 'Problem Solving',
+      description: 'Numerical problems and exercises'
+    },
+    {
+      value: 'mock_test',
+      icon: '📊',
+      name: 'Mock Test',
+      description: 'Timed test simulation'
+    }
+  ];
+
+  // Common study goals for Indian students
+  const commonGoals = [
+    'Complete Physics Chapter - Mechanics',
+    'Solve 50 Chemistry MCQs',
+    'Memorize Math Formulas',
+    'Biology Diagrams Practice',
+    'English Essay Writing',
+    'Previous Year Questions',
+    'Mock Test Practice',
+    'Revision of Important Topics',
+    'Weak Area Improvement',
+    'Speed and Accuracy Practice'
+  ];
 
   useEffect(() => {
     generateTimeSlots();
@@ -31,10 +89,12 @@ function SessionBooking() {
   const generateTimeSlots = () => {
     const slots = [];
     const start = new Date(selectedDate);
-    start.setHours(6, 0, 0, 0); // Start from 6 AM
     
-    // Generate slots from 6 AM to 11 PM (17 hours = 34 slots of 30 minutes)
-    for (let i = 0; i < 34; i++) {
+    // Indian students often study early morning and late night
+    // Generate slots from 5 AM to 11:30 PM
+    start.setHours(5, 0, 0, 0);
+    
+    for (let i = 0; i < 37; i++) { // 18.5 hours with 30-min slots
       const slotTime = addHours(start, i * 0.5);
       const now = new Date();
       
@@ -43,12 +103,22 @@ function SessionBooking() {
         slots.push({
           time: format(slotTime, 'h:mm a'),
           value: slotTime.toISOString(),
-          disabled: false
+          disabled: false,
+          isPopular: isPopularTime(slotTime) // Mark popular study times
         });
       }
     }
     
     setAvailableSlots(slots);
+  };
+
+  const isPopularTime = (time) => {
+    const hour = time.getHours();
+    // Popular study times for Indian students
+    return (hour >= 5 && hour <= 8) || // Early morning
+           (hour >= 9 && hour <= 12) || // Morning
+           (hour >= 14 && hour <= 17) || // Afternoon
+           (hour >= 20 && hour <= 23); // Night
   };
 
   const fetchBookedSlots = async () => {
@@ -88,10 +158,11 @@ function SessionBooking() {
         break;
       case 3:
         if (!duration) errors.duration = 'Please select session duration';
-        if (!taskMode) errors.taskMode = 'Please select a task mode';
+        if (!studyMode) errors.studyMode = 'Please select a study mode';
+        if (!subject) errors.subject = 'Please select a subject';
         break;
       case 4:
-        if (!goal.trim()) errors.goal = 'Please describe your session goal';
+        if (!goal.trim()) errors.goal = 'Please describe your study goal';
         if (goal.trim().length < 10) errors.goal = 'Goal should be at least 10 characters';
         break;
     }
@@ -123,20 +194,23 @@ function SessionBooking() {
         startTime: selectedTime,
         endTime: addHours(new Date(selectedTime), duration / 60).toISOString(),
         duration: duration,
-        taskMode: taskMode,
+        studyMode: studyMode,
+        subject: subject,
         goal: goal.trim(),
         status: 'scheduled',
         createdAt: new Date().toISOString(),
         partner: null,
-        partnerId: null
+        partnerId: null,
+        isIndiaSession: true, // Mark as India-focused session
+        studyType: getStudyType(studyMode)
       };
 
       const docRef = await addDoc(collection(db, 'sessions'), sessionData);
       
-      // Try to find a partner
-      await findPartner(docRef.id, sessionData);
+      // Try to find a study partner with similar preferences
+      await findStudyPartner(docRef.id, sessionData);
       
-      toast.success('Session booked successfully! 🎉');
+      toast.success('Study session booked successfully! 📚');
       navigate('/dashboard');
     } catch (error) {
       console.error('Error booking session:', error);
@@ -145,12 +219,25 @@ function SessionBooking() {
     setLoading(false);
   };
 
-  const findPartner = async (sessionId, sessionData) => {
+  const getStudyType = (mode) => {
+    const types = {
+      focused: 'Deep Study',
+      revision: 'Revision',
+      memorization: 'Memory Work',
+      practice: 'Problem Solving',
+      mock_test: 'Test Practice'
+    };
+    return types[mode] || 'Study';
+  };
+
+  const findStudyPartner = async (sessionId, sessionData) => {
     try {
+      // Look for partner with same subject and similar time
       const q = query(
         collection(db, 'sessions'),
         where('startTime', '==', sessionData.startTime),
         where('duration', '==', sessionData.duration),
+        where('subject', '==', sessionData.subject),
         where('status', '==', 'scheduled'),
         where('partnerId', '==', null),
         where('userId', '!=', user.uid)
@@ -161,10 +248,27 @@ function SessionBooking() {
       if (!snapshot.empty) {
         const partnerSession = snapshot.docs[0];
         const partnerData = partnerSession.data();
-        toast.success(`Great! You'll be paired with ${partnerData.userName} 🤝`);
+        
+        // Update both sessions with partner info
+        await Promise.all([
+          updateDoc(doc(db, 'sessions', sessionId), {
+            partnerId: partnerData.userId,
+            partnerName: partnerData.userName,
+            partnerPhoto: partnerData.userPhoto
+          }),
+          updateDoc(doc(db, 'sessions', partnerSession.id), {
+            partnerId: user.uid,
+            partnerName: user.displayName,
+            partnerPhoto: user.photoURL
+          })
+        ]);
+        
+        toast.success(`Great! Study partner found: ${partnerData.userName} 👥`);
+      } else {
+        toast.info('No study partner found yet. Don\'t worry, you can study solo or someone might join! 😊');
       }
     } catch (error) {
-      console.error('Error finding partner:', error);
+      console.error('Error finding study partner:', error);
     }
   };
 
@@ -186,13 +290,17 @@ function SessionBooking() {
     switch (step) {
       case 1: return 'Select Date';
       case 2: return 'Choose Time';
-      case 3: return 'Session Settings';
+      case 3: return 'Study Details';
       case 4: return 'Set Your Goal';
       default: return 'Book Session';
     }
   };
 
   const getProgress = () => (currentStep / 4) * 100;
+
+  const handleGoalSuggestion = (suggestion) => {
+    setGoal(suggestion);
+  };
 
   return (
     <div className="booking-container">
@@ -206,7 +314,7 @@ function SessionBooking() {
             <FiArrowLeft size={20} />
           </button>
           <div className="header-content">
-            <h2 className="booking-title">Book Your Focus Session</h2>
+            <h2 className="booking-title">Book Study Session</h2>
             <p className="booking-subtitle">{getStepTitle(currentStep)}</p>
           </div>
         </div>
@@ -237,7 +345,7 @@ function SessionBooking() {
             <div className="form-step">
               <div className="form-group">
                 <label>
-                  <FiCalendar /> Select Date
+                  <FiCalendar /> Select Study Date
                 </label>
                 <div className="date-navigation">
                   <button 
@@ -282,17 +390,18 @@ function SessionBooking() {
             <div className="form-step">
               <div className="form-group">
                 <label>
-                  <FiClock /> Available Times for {format(selectedDate, 'EEEE, MMMM d')}
+                  <FiClock /> Available Times - {format(selectedDate, 'EEEE, MMMM d')}
                 </label>
                 <div className="time-grid">
                   {availableSlots.map(slot => (
                     <button
                       key={slot.value}
-                      className={`time-slot ${selectedTime === slot.value ? 'active' : ''} ${isSlotBooked(slot.value) ? 'booked' : ''}`}
+                      className={`time-slot ${selectedTime === slot.value ? 'active' : ''} ${isSlotBooked(slot.value) ? 'booked' : ''} ${slot.isPopular ? 'popular' : ''}`}
                       onClick={() => setSelectedTime(slot.value)}
                       disabled={isSlotBooked(slot.value)}
                     >
                       {slot.time}
+                      {slot.isPopular && <span className="popular-badge">🔥</span>}
                     </button>
                   ))}
                 </div>
@@ -306,24 +415,28 @@ function SessionBooking() {
             </div>
           )}
 
-          {/* Step 3: Duration and Task Mode */}
+          {/* Step 3: Study Details */}
           {currentStep === 3 && (
             <div className="form-step">
               <div className="form-group">
                 <label>Session Duration</label>
                 <div className="duration-options">
                   {[
-                    { value: 25, label: '25 min', desc: 'Quick sprint' },
-                    { value: 50, label: '50 min', desc: 'Standard session' },
-                    { value: 75, label: '75 min', desc: 'Deep work' }
+                    { value: 25, label: '25 min', desc: 'Quick review', icon: '⚡' },
+                    { value: 50, label: '50 min', desc: 'Standard session', icon: '📚' },
+                    { value: 90, label: '90 min', desc: 'Deep study', icon: '🎯' },
+                    { value: 120, label: '2 hours', desc: 'Intensive prep', icon: '💪' }
                   ].map(option => (
                     <button
                       key={option.value}
                       className={`duration-btn ${duration === option.value ? 'active' : ''}`}
                       onClick={() => setDuration(option.value)}
                     >
-                      <div className="duration-label">{option.label}</div>
-                      <div className="duration-desc">{option.desc}</div>
+                      <div className="duration-icon">{option.icon}</div>
+                      <div className="duration-content">
+                        <div className="duration-label">{option.label}</div>
+                        <div className="duration-desc">{option.desc}</div>
+                      </div>
                     </button>
                   ))}
                 </div>
@@ -334,27 +447,44 @@ function SessionBooking() {
 
               <div className="form-group">
                 <label>
-                  <FiUsers /> Task Mode
+                  <FiBook /> Subject
                 </label>
-                <div className="task-modes">
-                  {[
-                    { value: 'desk', icon: '💻', name: 'Desk Work', desc: 'Computer tasks, writing, coding' },
-                    { value: 'moving', icon: '🏃', name: 'Active Tasks', desc: 'Cleaning, organizing, exercise' },
-                    { value: 'anything', icon: '✨', name: 'Flexible', desc: 'Mixed tasks or unsure' }
-                  ].map(mode => (
+                <select
+                  value={subject}
+                  onChange={(e) => setSubject(e.target.value)}
+                  className="subject-select"
+                >
+                  <option value="">Select Subject</option>
+                  {subjectOptions.map(sub => (
+                    <option key={sub} value={sub}>{sub}</option>
+                  ))}
+                </select>
+                {validationErrors.subject && (
+                  <span className="error-text">{validationErrors.subject}</span>
+                )}
+              </div>
+
+              <div className="form-group">
+                <label>
+                  <FiUsers /> Study Mode
+                </label>
+                <div className="study-modes">
+                  {studyModes.map(mode => (
                     <button
                       key={mode.value}
-                      className={`mode-btn ${taskMode === mode.value ? 'active' : ''}`}
-                      onClick={() => setTaskMode(mode.value)}
+                      className={`mode-btn ${studyMode === mode.value ? 'active' : ''}`}
+                      onClick={() => setStudyMode(mode.value)}
                     >
                       <div className="mode-icon">{mode.icon}</div>
-                      <div className="mode-name">{mode.name}</div>
-                      <div className="mode-desc">{mode.desc}</div>
+                      <div className="mode-content">
+                        <div className="mode-name">{mode.name}</div>
+                        <div className="mode-desc">{mode.description}</div>
+                      </div>
                     </button>
                   ))}
                 </div>
-                {validationErrors.taskMode && (
-                  <span className="error-text">{validationErrors.taskMode}</span>
+                {validationErrors.studyMode && (
+                  <span className="error-text">{validationErrors.studyMode}</span>
                 )}
               </div>
             </div>
@@ -365,11 +495,11 @@ function SessionBooking() {
             <div className="form-step">
               <div className="form-group">
                 <label>
-                  <FiTarget /> What's your goal for this session?
+                  <FiTarget /> What's your study goal for this session?
                 </label>
                 <textarea
                   className="goal-input"
-                  placeholder="E.g., Complete project report, Study for exam, Organize workspace, Write 500 words..."
+                  placeholder="E.g., Complete Physics Chapter 5, Solve 50 Chemistry MCQs, Memorize History dates..."
                   value={goal}
                   onChange={(e) => setGoal(e.target.value)}
                   rows={4}
@@ -383,24 +513,54 @@ function SessionBooking() {
                 )}
               </div>
 
+              {/* Quick Goal Suggestions */}
+              <div className="goal-suggestions">
+                <h4>Quick Suggestions:</h4>
+                <div className="suggestions-grid">
+                  {commonGoals.slice(0, 6).map((suggestion, index) => (
+                    <button
+                      key={index}
+                      className="suggestion-btn"
+                      onClick={() => handleGoalSuggestion(suggestion)}
+                    >
+                      {suggestion}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
               {/* Session Summary */}
               <div className="session-summary">
-                <h4>Session Summary</h4>
-                <div className="summary-item">
-                  <span>📅 Date:</span>
-                  <span>{format(selectedDate, 'EEEE, MMMM d')}</span>
-                </div>
-                <div className="summary-item">
-                  <span>⏰ Time:</span>
-                  <span>{format(new Date(selectedTime), 'h:mm a')}</span>
-                </div>
-                <div className="summary-item">
-                  <span>⏱️ Duration:</span>
-                  <span>{duration} minutes</span>
-                </div>
-                <div className="summary-item">
-                  <span>🎯 Mode:</span>
-                  <span>{taskMode === 'desk' ? 'Desk Work' : taskMode === 'moving' ? 'Active Tasks' : 'Flexible'}</span>
+                <h4>📋 Session Summary</h4>
+                <div className="summary-grid">
+                  <div className="summary-item">
+                    <span className="summary-icon">📅</span>
+                    <div className="summary-content">
+                      <span className="summary-label">Date</span>
+                      <span className="summary-value">{format(selectedDate, 'EEE, MMM d')}</span>
+                    </div>
+                  </div>
+                  <div className="summary-item">
+                    <span className="summary-icon">⏰</span>
+                    <div className="summary-content">
+                      <span className="summary-label">Time</span>
+                      <span className="summary-value">{format(new Date(selectedTime), 'h:mm a')}</span>
+                    </div>
+                  </div>
+                  <div className="summary-item">
+                    <span className="summary-icon">⏱️</span>
+                    <div className="summary-content">
+                      <span className="summary-label">Duration</span>
+                      <span className="summary-value">{duration} minutes</span>
+                    </div>
+                  </div>
+                  <div className="summary-item">
+                    <span className="summary-icon">📚</span>
+                    <div className="summary-content">
+                      <span className="summary-label">Subject</span>
+                      <span className="summary-value">{subject}</span>
+                    </div>
+                  </div>
                 </div>
               </div>
             </div>
@@ -411,7 +571,7 @@ function SessionBooking() {
             {currentStep > 1 && (
               <button 
                 type="button"
-                className="btn-secondary"
+                className="nav-btn btn-secondary"
                 onClick={prevStep}
               >
                 <FiArrowLeft size={16} />
@@ -419,10 +579,12 @@ function SessionBooking() {
               </button>
             )}
             
+            <div className="nav-spacer"></div>
+            
             {currentStep < 4 ? (
               <button 
                 type="button"
-                className="btn-primary"
+                className="nav-btn btn-primary"
                 onClick={nextStep}
               >
                 Continue
@@ -430,7 +592,7 @@ function SessionBooking() {
               </button>
             ) : (
               <button
-                className="btn-primary btn-large"
+                className="nav-btn btn-primary book-btn"
                 onClick={handleBookSession}
                 disabled={loading}
               >
@@ -442,11 +604,16 @@ function SessionBooking() {
                 ) : (
                   <>
                     <FiCheck size={16} />
-                    Book Session
+                    Book Study Session
                   </>
                 )}
               </button>
             )}
+          </div>
+
+          {/* Mobile step counter */}
+          <div className="mobile-step-counter">
+            <span>Step {currentStep} of 4</span>
           </div>
         </div>
       </div>
