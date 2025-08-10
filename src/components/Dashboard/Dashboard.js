@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { 
   collection, 
@@ -14,8 +14,7 @@ import {
 import { db } from '../../config/firebase';
 import { useAuth } from '../../hooks/useAuth';
 import SessionCard from './SessionCard';
-import Stats from './Stats';
-import { CSSLoadingSpinner, SkeletonLoader } from '../Common/LoadingSpinner';
+import { SkeletonLoader } from '../Common/LoadingSpinner';
 import { 
   FiPlus, 
   FiCalendar, 
@@ -27,7 +26,7 @@ import {
   FiBook,
   FiAward 
 } from 'react-icons/fi';
-import { format, isToday, isTomorrow, isYesterday, startOfDay, endOfDay, differenceInDays } from 'date-fns';
+import { startOfDay, differenceInDays } from 'date-fns';
 import toast from 'react-hot-toast';
 
 function Dashboard() {
@@ -60,6 +59,11 @@ function Dashboard() {
     "Transform your dreams into reality through focused action ✨"
   ];
 
+  const setRandomQuote = useCallback(() => {
+    const randomQuote = indiaFocusedQuotes[Math.floor(Math.random() * indiaFocusedQuotes.length)];
+    setMotivationalQuote(randomQuote);
+  }, [indiaFocusedQuotes]);
+
   useEffect(() => {
     const handleResize = () => {
       setIsMobile(window.innerWidth < 768);
@@ -69,17 +73,7 @@ function Dashboard() {
     return () => window.removeEventListener('resize', handleResize);
   }, []);
 
-  useEffect(() => {
-    fetchUserData();
-    setRandomQuote();
-  }, [user]);
-
-  const setRandomQuote = () => {
-    const randomQuote = indiaFocusedQuotes[Math.floor(Math.random() * indiaFocusedQuotes.length)];
-    setMotivationalQuote(randomQuote);
-  };
-
-  const fetchUserData = async (showRefreshIndicator = false) => {
+  const fetchUserData = useCallback(async (showRefreshIndicator = false) => {
     try {
       if (showRefreshIndicator) {
         setRefreshing(true);
@@ -143,7 +137,14 @@ function Dashboard() {
       setLoading(false);
       setRefreshing(false);
     }
-  };
+  }, [user.uid]);
+
+  useEffect(() => {
+    if (user) {
+      fetchUserData();
+      setRandomQuote();
+    }
+  }, [user, fetchUserData, setRandomQuote]);
 
   const calculateStats = (sessions) => {
     const totalSessions = sessions.length;
@@ -151,15 +152,21 @@ function Dashboard() {
       return acc + (session.actualDuration || session.duration || 0);
     }, 0);
 
-    // Calculate streak properly
+    // Calculate streak properly with date validation
     const streak = calculateProperStreak(sessions);
     
     // Calculate this week's sessions
     const thisWeekStart = startOfDay(new Date());
     thisWeekStart.setDate(thisWeekStart.getDate() - thisWeekStart.getDay()); // Start of week
     const thisWeek = sessions.filter(session => {
-      const sessionDate = new Date(session.endedAt || session.completedAt);
-      return sessionDate >= thisWeekStart;
+      try {
+        const sessionDate = new Date(session.endedAt || session.completedAt);
+        if (isNaN(sessionDate.getTime())) return false; // Invalid date check
+        return sessionDate >= thisWeekStart;
+      } catch (error) {
+        console.warn('Invalid session date:', session);
+        return false;
+      }
     }).length;
 
     // Calculate this month's sessions
@@ -167,8 +174,14 @@ function Dashboard() {
     thisMonthStart.setDate(1);
     thisMonthStart.setHours(0, 0, 0, 0);
     const thisMonth = sessions.filter(session => {
-      const sessionDate = new Date(session.endedAt || session.completedAt);
-      return sessionDate >= thisMonthStart;
+      try {
+        const sessionDate = new Date(session.endedAt || session.completedAt);
+        if (isNaN(sessionDate.getTime())) return false; // Invalid date check
+        return sessionDate >= thisMonthStart;
+      } catch (error) {
+        console.warn('Invalid session date:', session);
+        return false;
+      }
     }).length;
 
     // Calculate level based on total sessions (gamification for India students)
@@ -187,66 +200,89 @@ function Dashboard() {
   const calculateProperStreak = (sessions) => {
     if (!sessions || sessions.length === 0) return 0;
     
-    // Sort sessions by completion date (most recent first)
-    const sortedSessions = sessions.sort((a, b) => 
-      new Date(b.endedAt || b.completedAt) - new Date(a.endedAt || a.completedAt)
-    );
-    
-    // Group sessions by date
-    const sessionsByDate = {};
-    sortedSessions.forEach(session => {
-      const sessionDate = new Date(session.endedAt || session.completedAt);
-      const dateKey = startOfDay(sessionDate).toISOString();
+    try {
+      // Sort sessions by completion date (most recent first)
+      const sortedSessions = sessions.sort((a, b) => {
+        const dateA = new Date(b.endedAt || b.completedAt);
+        const dateB = new Date(a.endedAt || a.completedAt);
+        return dateA - dateB;
+      });
       
-      if (!sessionsByDate[dateKey]) {
-        sessionsByDate[dateKey] = [];
+      // Group sessions by date with validation
+      const sessionsByDate = {};
+      sortedSessions.forEach(session => {
+        try {
+          const sessionDate = new Date(session.endedAt || session.completedAt);
+          
+          // Validate the date
+          if (isNaN(sessionDate.getTime())) {
+            console.warn('Invalid session date found:', session);
+            return;
+          }
+          
+          const dateKey = startOfDay(sessionDate).toISOString();
+          
+          if (!sessionsByDate[dateKey]) {
+            sessionsByDate[dateKey] = [];
+          }
+          sessionsByDate[dateKey].push(session);
+        } catch (error) {
+          console.warn('Error processing session date:', session, error);
+        }
+      });
+      
+      const uniqueDates = Object.keys(sessionsByDate).sort((a, b) => new Date(b) - new Date(a));
+      
+      if (uniqueDates.length === 0) return 0;
+      
+      let streak = 0;
+      const today = startOfDay(new Date());
+      const yesterday = new Date(today);
+      yesterday.setDate(yesterday.getDate() - 1);
+      
+      // Check if streak can start (must have session today or yesterday)
+      const latestDate = new Date(uniqueDates[0]);
+      const latestIsToday = latestDate.toDateString() === today.toDateString();
+      const latestIsYesterday = latestDate.toDateString() === yesterday.toDateString();
+      
+      if (!latestIsToday && !latestIsYesterday) {
+        return 0; // No recent activity, streak is broken
       }
-      sessionsByDate[dateKey].push(session);
-    });
-    
-    const uniqueDates = Object.keys(sessionsByDate).sort((a, b) => new Date(b) - new Date(a));
-    
-    if (uniqueDates.length === 0) return 0;
-    
-    let streak = 0;
-    const today = startOfDay(new Date());
-    const yesterday = new Date(today);
-    yesterday.setDate(yesterday.getDate() - 1);
-    
-    // Check if streak can start (must have session today or yesterday)
-    const latestDate = new Date(uniqueDates[0]);
-    const latestIsToday = latestDate.toDateString() === today.toDateString();
-    const latestIsYesterday = latestDate.toDateString() === yesterday.toDateString();
-    
-    if (!latestIsToday && !latestIsYesterday) {
-      return 0; // No recent activity, streak is broken
-    }
-    
-    // Calculate consecutive days
-    let currentDate = latestIsToday ? today : yesterday;
-    
-    for (const dateString of uniqueDates) {
-      const sessionDate = new Date(dateString);
       
-      if (sessionDate.toDateString() === currentDate.toDateString()) {
-        streak++;
-        currentDate.setDate(currentDate.getDate() - 1);
-      } else {
-        // Check if there's a gap
-        const daysDiff = differenceInDays(currentDate, sessionDate);
-        if (daysDiff === -1) {
-          // Consecutive day found
-          streak++;
-          currentDate = sessionDate;
-          currentDate.setDate(currentDate.getDate() - 1);
-        } else {
-          // Gap found, streak broken
+      // Calculate consecutive days
+      let currentDate = latestIsToday ? today : yesterday;
+      
+      for (const dateString of uniqueDates) {
+        try {
+          const sessionDate = new Date(dateString);
+          
+          if (sessionDate.toDateString() === currentDate.toDateString()) {
+            streak++;
+            currentDate.setDate(currentDate.getDate() - 1);
+          } else {
+            // Check if there's a gap
+            const daysDiff = differenceInDays(currentDate, sessionDate);
+            if (daysDiff === -1) {
+              // Consecutive day found
+              streak++;
+              currentDate = sessionDate;
+              currentDate.setDate(currentDate.getDate() - 1);
+            } else {
+              // Gap found, streak broken
+              break;
+            }
+          }
+        } catch (error) {
+          console.warn('Error calculating streak for date:', dateString, error);
           break;
         }
       }
+      
+      return streak;
+    } catch (error) {
+      console.error('Error in calculateProperStreak:', error);
+      return 0;
     }
-    
-    return streak;
   };
 
   const updateUserStats = async (calculatedStats) => {
