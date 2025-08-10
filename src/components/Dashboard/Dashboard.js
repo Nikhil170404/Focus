@@ -8,13 +8,13 @@ import {
   orderBy, 
   limit,
   doc,
-  updateDoc,
+  setDoc,
+  getDoc,
   serverTimestamp 
 } from 'firebase/firestore';
 import { db } from '../../config/firebase';
 import { useAuth } from '../../hooks/useAuth';
 import SessionCard from './SessionCard';
-import { SkeletonLoader } from '../Common/LoadingSpinner';
 import { 
   FiPlus, 
   FiCalendar, 
@@ -45,50 +45,76 @@ function Dashboard() {
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [activeTab, setActiveTab] = useState('upcoming');
-  const [error, setError] = useState(null);
-  const [isMobile, setIsMobile] = useState(window.innerWidth < 768);
-  const [motivationalQuote, setMotivationalQuote] = useState('');
 
-  const indiaFocusedQuotes = [
-    "करम कर, फल की चिंता मत कर - Focus on your action, not the result 🎯",
-    "सफलता का रहस्य है निरंतर अभ्यास - Success secret is continuous practice 📚",
-    "छोटे कदम, बड़े सपने - Small steps, big dreams 🚀",
-    "आज का कठिन परिश्रम, कल की सफलता - Today's hard work, tomorrow's success 💪",
-    "Focus is the bridge between goals and achievement 🌉",
-    "Every JEE/NEET aspirant needs focused study sessions 📖",
-    "Transform your dreams into reality through focused action ✨"
+  const motivationalQuotes = [
+    "Focus on progress, not perfection 🎯",
+    "Small steps daily lead to big changes 📚",
+    "Your future depends on what you do today 💪",
+    "Success is the sum of small efforts 🚀",
+    "Stay focused and never give up ✨"
   ];
 
-  const setRandomQuote = useCallback(() => {
-    const randomQuote = indiaFocusedQuotes[Math.floor(Math.random() * indiaFocusedQuotes.length)];
-    setMotivationalQuote(randomQuote);
-  }, [indiaFocusedQuotes]);
-
-  useEffect(() => {
-    const handleResize = () => {
-      setIsMobile(window.innerWidth < 768);
-    };
-
-    window.addEventListener('resize', handleResize);
-    return () => window.removeEventListener('resize', handleResize);
-  }, []);
-
-  const fetchUserData = useCallback(async (showRefreshIndicator = false) => {
+  // Ensure user document exists
+  const ensureUserDocument = useCallback(async () => {
+    if (!user) return;
+    
     try {
-      if (showRefreshIndicator) {
-        setRefreshing(true);
-      } else {
-        setLoading(true);
+      const userDocRef = doc(db, 'users', user.uid);
+      const userDoc = await getDoc(userDocRef);
+      
+      if (!userDoc.exists()) {
+        // Create user document if it doesn't exist
+        const userData = {
+          uid: user.uid,
+          name: user.displayName || user.email?.split('@')[0] || 'User',
+          email: user.email,
+          photoURL: user.photoURL || null,
+          createdAt: serverTimestamp(),
+          totalSessions: 0,
+          totalMinutes: 0,
+          currentStreak: 0,
+          level: 1,
+          bio: '',
+          timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+          preferences: {
+            sessionReminders: true,
+            emailNotifications: true,
+            soundEnabled: true
+          }
+        };
+        
+        await setDoc(userDocRef, userData);
+        console.log('User document created successfully');
       }
-      setError(null);
+    } catch (error) {
+      console.error('Error ensuring user document:', error);
+    }
+  }, [user]);
 
-      // Fetch upcoming sessions (scheduled and active)
+  const fetchUserData = useCallback(async (showLoader = true) => {
+    if (!user) return;
+
+    try {
+      if (showLoader) {
+        setLoading(true);
+      } else {
+        setRefreshing(true);
+      }
+
+      // Ensure user document exists first
+      await ensureUserDocument();
+
+      // Fetch sessions
+      const now = new Date();
+      
+      // Upcoming sessions
       const upcomingQuery = query(
         collection(db, 'sessions'),
         where('userId', '==', user.uid),
         where('status', 'in', ['scheduled', 'active']),
+        where('startTime', '>', now.toISOString()),
         orderBy('startTime', 'asc'),
-        limit(10)
+        limit(5)
       );
       
       const upcomingSnapshot = await getDocs(upcomingQuery);
@@ -96,22 +122,15 @@ function Dashboard() {
         id: doc.id,
         ...doc.data()
       }));
+      setUpcomingSessions(upcomingData);
 
-      // Filter future sessions only
-      const now = new Date();
-      const futureUpcoming = upcomingData.filter(session => 
-        new Date(session.startTime) > now
-      );
-      
-      setUpcomingSessions(futureUpcoming);
-
-      // Fetch completed sessions
+      // Completed sessions
       const completedQuery = query(
         collection(db, 'sessions'),
         where('userId', '==', user.uid),
         where('status', '==', 'completed'),
         orderBy('endedAt', 'desc'),
-        limit(50) // Get more for accurate streak calculation
+        limit(20)
       );
       
       const completedSnapshot = await getDocs(completedQuery);
@@ -119,32 +138,23 @@ function Dashboard() {
         id: doc.id,
         ...doc.data()
       }));
-      
       setCompletedSessions(completedData);
 
-      // Calculate comprehensive stats
+      // Calculate stats
       const calculatedStats = calculateStats(completedData);
       setStats(calculatedStats);
 
-      // Update user stats in Firebase
+      // Update user stats safely
       await updateUserStats(calculatedStats);
 
     } catch (error) {
-      console.error('Error fetching user data:', error);
-      setError('Failed to load dashboard data');
+      console.error('Error fetching data:', error);
       toast.error('Failed to load dashboard data');
     } finally {
       setLoading(false);
       setRefreshing(false);
     }
-  }, [user.uid]);
-
-  useEffect(() => {
-    if (user) {
-      fetchUserData();
-      setRandomQuote();
-    }
-  }, [user, fetchUserData, setRandomQuote]);
+  }, [user, ensureUserDocument]);
 
   const calculateStats = (sessions) => {
     const totalSessions = sessions.length;
@@ -152,40 +162,28 @@ function Dashboard() {
       return acc + (session.actualDuration || session.duration || 0);
     }, 0);
 
-    // Calculate streak properly with date validation
-    const streak = calculateProperStreak(sessions);
+    // Calculate streak
+    const streak = calculateStreak(sessions);
     
-    // Calculate this week's sessions
-    const thisWeekStart = startOfDay(new Date());
-    thisWeekStart.setDate(thisWeekStart.getDate() - thisWeekStart.getDay()); // Start of week
+    // This week's sessions
+    const weekStart = startOfDay(new Date());
+    weekStart.setDate(weekStart.getDate() - weekStart.getDay());
     const thisWeek = sessions.filter(session => {
-      try {
-        const sessionDate = new Date(session.endedAt || session.completedAt);
-        if (isNaN(sessionDate.getTime())) return false; // Invalid date check
-        return sessionDate >= thisWeekStart;
-      } catch (error) {
-        console.warn('Invalid session date:', session);
-        return false;
-      }
+      const sessionDate = session.endedAt?.toDate?.() || new Date(session.endedAt);
+      return sessionDate >= weekStart;
     }).length;
 
-    // Calculate this month's sessions
-    const thisMonthStart = new Date();
-    thisMonthStart.setDate(1);
-    thisMonthStart.setHours(0, 0, 0, 0);
+    // This month's sessions
+    const monthStart = new Date();
+    monthStart.setDate(1);
+    monthStart.setHours(0, 0, 0, 0);
     const thisMonth = sessions.filter(session => {
-      try {
-        const sessionDate = new Date(session.endedAt || session.completedAt);
-        if (isNaN(sessionDate.getTime())) return false; // Invalid date check
-        return sessionDate >= thisMonthStart;
-      } catch (error) {
-        console.warn('Invalid session date:', session);
-        return false;
-      }
+      const sessionDate = session.endedAt?.toDate?.() || new Date(session.endedAt);
+      return sessionDate >= monthStart;
     }).length;
 
-    // Calculate level based on total sessions (gamification for India students)
-    const level = Math.floor(totalSessions / 10) + 1; // Level up every 10 sessions
+    // Calculate level
+    const level = Math.floor(totalSessions / 10) + 1;
 
     return {
       totalSessions,
@@ -197,165 +195,99 @@ function Dashboard() {
     };
   };
 
-  const calculateProperStreak = (sessions) => {
+  const calculateStreak = (sessions) => {
     if (!sessions || sessions.length === 0) return 0;
     
-    try {
-      // Sort sessions by completion date (most recent first)
-      const sortedSessions = sessions.sort((a, b) => {
-        const dateA = new Date(b.endedAt || b.completedAt);
-        const dateB = new Date(a.endedAt || a.completedAt);
-        return dateA - dateB;
-      });
-      
-      // Group sessions by date with validation
-      const sessionsByDate = {};
-      sortedSessions.forEach(session => {
-        try {
-          const sessionDate = new Date(session.endedAt || session.completedAt);
-          
-          // Validate the date
-          if (isNaN(sessionDate.getTime())) {
-            console.warn('Invalid session date found:', session);
-            return;
-          }
-          
-          const dateKey = startOfDay(sessionDate).toISOString();
-          
-          if (!sessionsByDate[dateKey]) {
-            sessionsByDate[dateKey] = [];
-          }
-          sessionsByDate[dateKey].push(session);
-        } catch (error) {
-          console.warn('Error processing session date:', session, error);
-        }
-      });
-      
-      const uniqueDates = Object.keys(sessionsByDate).sort((a, b) => new Date(b) - new Date(a));
-      
-      if (uniqueDates.length === 0) return 0;
-      
-      let streak = 0;
-      const today = startOfDay(new Date());
-      const yesterday = new Date(today);
-      yesterday.setDate(yesterday.getDate() - 1);
-      
-      // Check if streak can start (must have session today or yesterday)
-      const latestDate = new Date(uniqueDates[0]);
-      const latestIsToday = latestDate.toDateString() === today.toDateString();
-      const latestIsYesterday = latestDate.toDateString() === yesterday.toDateString();
-      
-      if (!latestIsToday && !latestIsYesterday) {
-        return 0; // No recent activity, streak is broken
-      }
-      
-      // Calculate consecutive days
-      let currentDate = latestIsToday ? today : yesterday;
-      
-      for (const dateString of uniqueDates) {
-        try {
-          const sessionDate = new Date(dateString);
-          
-          if (sessionDate.toDateString() === currentDate.toDateString()) {
-            streak++;
-            currentDate.setDate(currentDate.getDate() - 1);
-          } else {
-            // Check if there's a gap
-            const daysDiff = differenceInDays(currentDate, sessionDate);
-            if (daysDiff === -1) {
-              // Consecutive day found
-              streak++;
-              currentDate = sessionDate;
-              currentDate.setDate(currentDate.getDate() - 1);
-            } else {
-              // Gap found, streak broken
-              break;
-            }
-          }
-        } catch (error) {
-          console.warn('Error calculating streak for date:', dateString, error);
-          break;
-        }
-      }
-      
-      return streak;
-    } catch (error) {
-      console.error('Error in calculateProperStreak:', error);
-      return 0;
+    // Sort sessions by date
+    const sortedSessions = [...sessions].sort((a, b) => {
+      const dateA = a.endedAt?.toDate?.() || new Date(a.endedAt);
+      const dateB = b.endedAt?.toDate?.() || new Date(b.endedAt);
+      return dateB - dateA;
+    });
+    
+    // Group by date
+    const sessionDates = new Set();
+    sortedSessions.forEach(session => {
+      const date = session.endedAt?.toDate?.() || new Date(session.endedAt);
+      const dateStr = startOfDay(date).toISOString();
+      sessionDates.add(dateStr);
+    });
+    
+    const uniqueDates = Array.from(sessionDates).sort((a, b) => new Date(b) - new Date(a));
+    if (uniqueDates.length === 0) return 0;
+    
+    let streak = 0;
+    const today = startOfDay(new Date());
+    const yesterday = new Date(today);
+    yesterday.setDate(yesterday.getDate() - 1);
+    
+    // Check if streak is active
+    const latestDate = new Date(uniqueDates[0]);
+    if (differenceInDays(today, latestDate) > 1) {
+      return 0; // Streak broken
     }
+    
+    // Count consecutive days
+    let currentDate = latestDate;
+    for (let i = 0; i < uniqueDates.length; i++) {
+      const sessionDate = new Date(uniqueDates[i]);
+      const dayDiff = differenceInDays(currentDate, sessionDate);
+      
+      if (dayDiff <= 1) {
+        streak++;
+        currentDate = sessionDate;
+      } else {
+        break;
+      }
+    }
+    
+    return streak;
   };
 
   const updateUserStats = async (calculatedStats) => {
+    if (!user) return;
+    
     try {
       const userDocRef = doc(db, 'users', user.uid);
-      await updateDoc(userDocRef, {
+      
+      // Use setDoc with merge to update or create
+      await setDoc(userDocRef, {
         totalSessions: calculatedStats.totalSessions,
         totalMinutes: calculatedStats.totalMinutes,
         currentStreak: calculatedStats.streak,
         level: calculatedStats.level,
         lastActivityDate: serverTimestamp(),
         updatedAt: serverTimestamp()
-      });
+      }, { merge: true });
+      
     } catch (error) {
       console.error('Error updating user stats:', error);
+      // Don't show error to user, silently fail
     }
+  };
+
+  useEffect(() => {
+    if (user) {
+      fetchUserData();
+    }
+  }, [user, fetchUserData]);
+
+  const handleRefresh = () => {
+    fetchUserData(false);
+    toast.success('Data refreshed!');
   };
 
   const formatGreeting = () => {
     const hour = new Date().getHours();
-    const name = user.displayName?.split(' ')[0] || 'Student';
+    const name = user?.displayName?.split(' ')[0] || 'Student';
     
-    if (hour < 12) return `शुभ प्रभात, ${name}! Good morning!`;
-    if (hour < 17) return `नमस्ते, ${name}! Good afternoon!`;
-    return `शुभ संध्या, ${name}! Good evening!`;
+    if (hour < 12) return `Good morning, ${name}! ☀️`;
+    if (hour < 17) return `Good afternoon, ${name}! 🌤️`;
+    return `Good evening, ${name}! 🌙`;
   };
 
-  const getStudentLevel = (level) => {
-    if (level >= 20) return { title: "Focus Master", color: "#8B5CF6", icon: "👑" };
-    if (level >= 15) return { title: "Study Expert", color: "#06B6D4", icon: "🎓" };
-    if (level >= 10) return { title: "Dedicated Learner", color: "#10B981", icon: "📚" };
-    if (level >= 5) return { title: "Rising Scholar", color: "#F59E0B", icon: "⭐" };
-    return { title: "Beginner", color: "#6B7280", icon: "🌱" };
-  };
-
-  const handleRefresh = () => {
-    fetchUserData(true);
-    setRandomQuote();
-  };
-
-  const getNextSessionInfo = () => {
-    if (upcomingSessions.length === 0) return null;
-    
-    const nextSession = upcomingSessions[0];
-    const sessionDate = new Date(nextSession.startTime);
-    const now = new Date();
-    const timeDiff = sessionDate - now;
-    
-    if (timeDiff < 0) return null;
-    
-    const hours = Math.floor(timeDiff / (1000 * 60 * 60));
-    const minutes = Math.floor((timeDiff % (1000 * 60 * 60)) / (1000 * 60));
-    
-    let timeString = '';
-    if (hours > 24) {
-      const days = Math.floor(hours / 24);
-      timeString = `in ${days} day${days > 1 ? 's' : ''}`;
-    } else if (hours > 0) {
-      timeString = `in ${hours}h ${minutes}m`;
-    } else {
-      timeString = `in ${minutes} minutes`;
-    }
-    
-    return {
-      session: nextSession,
-      timeString,
-      isUpcoming: timeDiff > 0,
-      canJoinEarly: timeDiff < 15 * 60 * 1000
-    };
-  };
-
-  const handleJoinSession = (sessionId) => {
-    navigate(`/session/${sessionId}`);
+  const getRandomQuote = () => {
+    return motivationalQuotes[Math.floor(Math.random() * motivationalQuotes.length)];
   };
 
   const quickActions = [
@@ -363,85 +295,47 @@ function Dashboard() {
       icon: FiCalendar,
       label: 'Book Session',
       action: () => navigate('/book-session'),
-      color: 'primary',
-      description: 'Schedule focused study time'
+      color: 'primary'
     },
     {
       icon: FiTarget,
-      label: 'Study Goals',
+      label: 'Goals',
       action: () => navigate('/profile'),
-      color: 'success',
-      description: 'Set your targets'
+      color: 'success'
     },
     {
       icon: FiBook,
-      label: 'Study Stats',
+      label: 'Stats',
       action: () => navigate('/profile'),
-      color: 'warning',
-      description: 'Track progress'
+      color: 'warning'
     },
     {
       icon: FiAward,
       label: 'Achievements',
       action: () => navigate('/profile'),
-      color: 'secondary',
-      description: 'View rewards'
+      color: 'secondary'
     }
   ];
 
   if (loading) {
     return (
       <div className="dashboard">
-        <div className="dashboard-loading">
-          <div className="header-skeleton">
-            <SkeletonLoader lines={2} />
-          </div>
-          <div className="stats-skeleton">
-            {[1, 2, 3, 4].map(i => (
-              <SkeletonLoader key={i} lines={2} />
-            ))}
-          </div>
-          <div className="content-skeleton">
-            <SkeletonLoader lines={4} />
-            <SkeletonLoader lines={4} />
-          </div>
+        <div className="loading-container">
+          <div className="spinner"></div>
+          <p>Loading your dashboard...</p>
         </div>
       </div>
     );
   }
-
-  if (error) {
-    return (
-      <div className="dashboard">
-        <div className="error-state">
-          <div className="error-icon">⚠️</div>
-          <h3>Something went wrong</h3>
-          <p>{error}</p>
-          <button className="btn-primary" onClick={() => fetchUserData()}>
-            <FiRefreshCw size={16} />
-            Try Again
-          </button>
-        </div>
-      </div>
-    );
-  }
-
-  const nextSessionInfo = getNextSessionInfo();
-  const studentLevel = getStudentLevel(stats.level);
 
   return (
     <div className="dashboard">
-      {/* Header Section */}
+      {/* Header */}
       <div className="dashboard-header">
         <div className="header-content">
           <div className="greeting-section">
             <h1>{formatGreeting()}</h1>
-            <p className="motivational-message">{motivationalQuote}</p>
-            <div className="student-level">
-              <span className="level-badge" style={{ backgroundColor: studentLevel.color }}>
-                {studentLevel.icon} Level {stats.level} - {studentLevel.title}
-              </span>
-            </div>
+            <p className="motivational-message">{getRandomQuote()}</p>
           </div>
           
           <div className="header-actions">
@@ -449,117 +343,80 @@ function Dashboard() {
               className="refresh-button"
               onClick={handleRefresh}
               disabled={refreshing}
-              title="Refresh data"
             >
-              <FiRefreshCw size={16} className={refreshing ? 'spinning' : ''} />
+              <FiRefreshCw className={refreshing ? 'spinning' : ''} />
             </button>
             
             <button 
-              className="btn-primary book-session-btn"
+              className="btn-primary"
               onClick={() => navigate('/book-session')}
             >
-              <FiPlus size={16} />
-              <span className="btn-text">{isMobile ? 'Book' : 'Book Study Session'}</span>
+              <FiPlus />
+              Book Session
             </button>
           </div>
         </div>
-        
-        {/* Next Session Alert */}
-        {nextSessionInfo && (
-          <div className="next-session-alert">
-            <div className="alert-content">
-              <div className="alert-icon">⏰</div>
-              <div className="alert-text">
-                <strong>Next study session starts {nextSessionInfo.timeString}</strong>
-                <span>"{nextSessionInfo.session.goal}"</span>
-              </div>
-              {nextSessionInfo.canJoinEarly && (
-                <button 
-                  className="join-button"
-                  onClick={() => handleJoinSession(nextSessionInfo.session.id)}
-                >
-                  <FiUsers size={14} />
-                  Join Early
-                </button>
-              )}
-            </div>
-          </div>
-        )}
       </div>
 
-      {/* Enhanced Stats Section */}
+      {/* Stats Grid */}
       <div className="enhanced-stats-grid">
         <div className="stat-card primary">
           <div className="stat-icon">
-            <FiBook size={24} />
+            <FiBook />
           </div>
           <div className="stat-content">
             <h3>Total Sessions</h3>
             <p>{stats.totalSessions}</p>
-            <span className="stat-subtitle">Study sessions completed</span>
           </div>
         </div>
 
         <div className="stat-card success">
           <div className="stat-icon">
-            <FiClock size={24} />
+            <FiClock />
           </div>
           <div className="stat-content">
             <h3>Focus Time</h3>
-            <p>{Math.floor(stats.totalMinutes / 60)}h {stats.totalMinutes % 60}m</p>
-            <span className="stat-subtitle">Total study hours</span>
+            <p>{Math.floor(stats.totalMinutes / 60)}h</p>
           </div>
         </div>
 
         <div className="stat-card warning">
           <div className="stat-icon">
-            <FiTrendingUp size={24} />
+            <FiTrendingUp />
           </div>
           <div className="stat-content">
-            <h3>Current Streak</h3>
+            <h3>Streak</h3>
             <p>{stats.streak} days</p>
-            <span className="stat-subtitle">
-              {stats.streak > 0 ? 'Keep it up! 🔥' : 'Start your streak today!'}
-            </span>
           </div>
         </div>
 
         <div className="stat-card secondary">
           <div className="stat-icon">
-            <FiAward size={24} />
+            <FiAward />
           </div>
           <div className="stat-content">
-            <h3>This Week</h3>
-            <p>{stats.thisWeek} sessions</p>
-            <span className="stat-subtitle">Weekly progress</span>
+            <h3>Level</h3>
+            <p>{stats.level}</p>
           </div>
         </div>
       </div>
 
-      {/* Sessions Section */}
+      {/* Sessions */}
       <div className="sessions-section">
         <div className="section-header">
-          <h2>Your Study Sessions</h2>
+          <h2>Sessions</h2>
           <div className="tab-switcher">
             <button 
               className={`tab-button ${activeTab === 'upcoming' ? 'active' : ''}`}
               onClick={() => setActiveTab('upcoming')}
             >
-              <FiCalendar size={16} />
-              <span>Upcoming</span>
-              {upcomingSessions.length > 0 && (
-                <span className="tab-badge">{upcomingSessions.length}</span>
-              )}
+              Upcoming
             </button>
             <button 
               className={`tab-button ${activeTab === 'completed' ? 'active' : ''}`}
               onClick={() => setActiveTab('completed')}
             >
-              <FiClock size={16} />
-              <span>Completed</span>
-              {completedSessions.length > 0 && (
-                <span className="tab-badge">{Math.min(completedSessions.length, 10)}</span>
-              )}
+              Completed
             </button>
           </div>
         </div>
@@ -569,62 +426,41 @@ function Dashboard() {
             upcomingSessions.length > 0 ? (
               <div className="sessions-list">
                 {upcomingSessions.map(session => (
-                  <SessionCard 
-                    key={session.id} 
-                    session={session} 
-                    onJoin={() => handleJoinSession(session.id)}
-                    showJoinButton={true}
-                    isMobile={isMobile}
-                  />
+                  <SessionCard key={session.id} session={session} />
                 ))}
               </div>
             ) : (
               <div className="empty-state">
-                <div className="empty-icon">📚</div>
-                <h3>No upcoming study sessions</h3>
-                <p>Ready to boost your preparation? Book your next focused study session!</p>
+                <h3>No upcoming sessions</h3>
+                <p>Book a session to get started!</p>
                 <button 
                   className="btn-primary"
                   onClick={() => navigate('/book-session')}
                 >
-                  <FiPlus size={16} />
-                  Book Your First Session
+                  <FiPlus /> Book Now
                 </button>
               </div>
             )
           ) : (
             completedSessions.length > 0 ? (
               <div className="sessions-list">
-                {completedSessions.slice(0, 10).map(session => (
-                  <SessionCard 
-                    key={session.id} 
-                    session={session} 
-                    completed={true}
-                    isMobile={isMobile}
-                  />
+                {completedSessions.slice(0, 5).map(session => (
+                  <SessionCard key={session.id} session={session} completed />
                 ))}
               </div>
             ) : (
               <div className="empty-state">
-                <div className="empty-icon">🎯</div>
                 <h3>No completed sessions yet</h3>
-                <p>Start your first study session to see your progress here!</p>
-                <button 
-                  className="btn-secondary"
-                  onClick={() => navigate('/book-session')}
-                >
-                  <FiCalendar size={16} />
-                  Schedule a Session
-                </button>
+                <p>Complete your first session to see progress!</p>
               </div>
             )
           )}
         </div>
       </div>
 
-      {/* Quick Actions for Students */}
+      {/* Quick Actions */}
       <div className="quick-actions">
-        <h3>Quick Actions for Students</h3>
+        <h3>Quick Actions</h3>
         <div className="actions-grid">
           {quickActions.map((action, index) => (
             <button 
@@ -632,40 +468,10 @@ function Dashboard() {
               className={`action-card ${action.color}`}
               onClick={action.action}
             >
-              <action.icon size={isMobile ? 20 : 24} />
-              <div className="action-content">
-                <span className="action-label">{action.label}</span>
-                <span className="action-description">{action.description}</span>
-              </div>
+              <action.icon size={20} />
+              <span>{action.label}</span>
             </button>
           ))}
-        </div>
-      </div>
-
-      {/* Study Tips for India Students */}
-      <div className="study-tips">
-        <h3>Study Tips for Success</h3>
-        <div className="tips-grid">
-          <div className="tip-card">
-            <div className="tip-icon">🧠</div>
-            <h4>Pomodoro Technique</h4>
-            <p>25-min focused study + 5-min break = Better retention</p>
-          </div>
-          <div className="tip-card">
-            <div className="tip-icon">🎯</div>
-            <h4>Set Clear Goals</h4>
-            <p>Define what you want to achieve in each session</p>
-          </div>
-          <div className="tip-card">
-            <div className="tip-icon">👥</div>
-            <h4>Study Partners</h4>
-            <p>Accountability partners help maintain consistency</p>
-          </div>
-          <div className="tip-card">
-            <div className="tip-icon">📊</div>
-            <h4>Track Progress</h4>
-            <p>Monitor your study hours and streak daily</p>
-          </div>
         </div>
       </div>
     </div>
