@@ -1,7 +1,7 @@
-import { ref, push, onValue, off, serverTimestamp } from 'firebase/database';
+import { ref, push, onValue, off, serverTimestamp, set } from 'firebase/database';
 import { realtimeDb } from '../config/firebase';
 
-export class WebRTCService {
+export class EnhancedWebRTCService {
   constructor(sessionId, userId, isInitiator) {
     this.sessionId = sessionId;
     this.userId = userId;
@@ -11,29 +11,29 @@ export class WebRTCService {
     this.peerConnection = null;
     this.onRemoteStreamCallback = null;
     this.onConnectionStateChangeCallback = null;
+    this.onErrorCallback = null;
     this.signalListener = null;
     this.reconnectAttempts = 0;
     this.maxReconnectAttempts = 3;
     this.isProduction = process.env.NODE_ENV === 'production';
+    this.isDestroyed = false;
     
-    // Enhanced configuration for production deployment
+    // Enhanced configuration optimized for Vercel deployment
     this.configuration = {
       iceServers: [
-        // Google STUN servers
+        // Google STUN servers - most reliable globally
         { urls: 'stun:stun.l.google.com:19302' },
         { urls: 'stun:stun1.l.google.com:19302' },
         { urls: 'stun:stun2.l.google.com:19302' },
         { urls: 'stun:stun3.l.google.com:19302' },
         { urls: 'stun:stun4.l.google.com:19302' },
         
-        // Additional STUN servers for better connectivity
+        // Additional reliable STUN servers
         { urls: 'stun:stun.stunprotocol.org:3478' },
         { urls: 'stun:stun.services.mozilla.com' },
         { urls: 'stun:stun.ekiga.net' },
-        { urls: 'stun:stun.fwdnet.net' },
-        { urls: 'stun:stun.ideasip.com' },
         
-        // Free TURN servers for production
+        // Free TURN servers for NAT traversal
         {
           urls: 'turn:numb.viagenie.ca',
           credential: 'muazkh',
@@ -43,6 +43,21 @@ export class WebRTCService {
           urls: 'turn:turn.anyfirewall.com:443?transport=tcp',
           credential: 'webrtc',
           username: 'webrtc'
+        },
+        {
+          urls: 'turn:openrelay.metered.ca:80',
+          credential: 'openrelayproject',
+          username: 'openrelayproject'
+        },
+        {
+          urls: 'turn:openrelay.metered.ca:443',
+          credential: 'openrelayproject',
+          username: 'openrelayproject'
+        },
+        {
+          urls: 'turn:openrelay.metered.ca:443?transport=tcp',
+          credential: 'openrelayproject',
+          username: 'openrelayproject'
         }
       ],
       iceCandidatePoolSize: 10,
@@ -50,43 +65,56 @@ export class WebRTCService {
       rtcpMuxPolicy: 'require',
       iceTransportPolicy: 'all'
     };
+
+    console.log('🚀 WebRTC Service initialized', {
+      sessionId,
+      userId,
+      isInitiator,
+      isProduction: this.isProduction
+    });
   }
 
   async initializeMedia(constraints = null) {
     try {
+      console.log('🎥 Initializing media...');
+      
       // Check browser support
       if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-        throw new Error('Your browser does not support video calling. Please use Chrome, Firefox, Safari, or Edge.');
+        throw new Error('Camera/microphone not supported in this browser');
       }
 
-      // Check HTTPS requirement for production
-      if (this.isProduction && window.location.protocol !== 'https:') {
-        throw new Error('Video calling requires a secure connection (HTTPS) in production.');
+      // Check for secure context (HTTPS)
+      if (!window.isSecureContext && this.isProduction) {
+        throw new Error('Camera access requires HTTPS in production');
       }
 
       const defaultConstraints = {
         video: {
-          width: { ideal: 1280, max: 1920 },
-          height: { ideal: 720, max: 1080 },
+          width: { min: 320, ideal: 1280, max: 1920 },
+          height: { min: 240, ideal: 720, max: 1080 },
           facingMode: 'user',
-          frameRate: { ideal: 30, max: 30 }
+          frameRate: { min: 15, ideal: 30, max: 30 }
         },
         audio: {
           echoCancellation: true,
           noiseSuppression: true,
           autoGainControl: true,
-          sampleRate: { ideal: 44100 }
+          channelCount: { ideal: 1 },
+          sampleRate: { ideal: 48000 },
+          sampleSize: { ideal: 16 }
         }
       };
 
+      let stream;
+      
       try {
-        // Try high quality first
-        this.localStream = await navigator.mediaDevices.getUserMedia(
+        // Try with ideal settings first
+        stream = await navigator.mediaDevices.getUserMedia(
           constraints || defaultConstraints
         );
-        console.log('High quality media stream obtained');
+        console.log('✅ High quality media stream obtained');
       } catch (primaryError) {
-        console.warn('High quality media failed, trying fallback:', primaryError);
+        console.warn('⚠️ High quality failed, trying fallback:', primaryError.message);
         
         // Fallback to lower quality
         const fallbackConstraints = {
@@ -102,69 +130,82 @@ export class WebRTCService {
         };
         
         try {
-          this.localStream = await navigator.mediaDevices.getUserMedia(fallbackConstraints);
-          console.log('Medium quality media stream obtained');
+          stream = await navigator.mediaDevices.getUserMedia(fallbackConstraints);
+          console.log('✅ Medium quality media stream obtained');
         } catch (fallbackError) {
-          console.warn('Video failed, trying audio only:', fallbackError);
+          console.warn('⚠️ Video failed, trying audio only:', fallbackError.message);
           
           // Last resort: audio only
           try {
-            this.localStream = await navigator.mediaDevices.getUserMedia({ 
+            stream = await navigator.mediaDevices.getUserMedia({ 
               audio: {
                 echoCancellation: true,
                 noiseSuppression: true
               }
             });
-            console.log('Audio-only stream obtained');
+            console.log('✅ Audio-only stream obtained');
           } catch (audioError) {
-            throw new Error('Unable to access microphone. Please check permissions.');
+            throw new Error('Unable to access microphone');
           }
         }
       }
       
-      return this.localStream;
+      this.localStream = stream;
+      console.log('📊 Media tracks:', stream.getTracks().map(t => ({
+        kind: t.kind,
+        enabled: t.enabled,
+        readyState: t.readyState
+      })));
+      
+      return stream;
     } catch (error) {
-      console.error('Media initialization error:', error);
+      console.error('❌ Media initialization error:', error);
       
       // Provide specific error messages
       if (error.name === 'NotAllowedError') {
-        throw new Error('Camera and microphone access denied. Please allow permissions in your browser and reload the page.');
+        throw new Error('Camera/microphone access denied. Please allow permissions and reload.');
       } else if (error.name === 'NotFoundError') {
-        throw new Error('No camera or microphone found. Please connect devices and try again.');
+        throw new Error('No camera or microphone found. Please connect devices.');
       } else if (error.name === 'NotSupportedError') {
-        throw new Error('Your browser does not support video calling. Please use Chrome, Firefox, Safari, or Edge.');
+        throw new Error('Camera/microphone not supported by your browser.');
       } else if (error.name === 'OverconstrainedError') {
-        throw new Error('Camera settings not supported. Trying with default settings...');
+        throw new Error('Camera settings not supported. Trying basic settings...');
       } else if (error.name === 'SecurityError') {
-        throw new Error('Security error: Please ensure you\'re on a secure connection (HTTPS).');
+        throw new Error('Security error: Please ensure HTTPS connection.');
       } else {
-        throw new Error(`Media access failed: ${error.message}`);
+        throw error;
       }
     }
   }
 
-  async createPeerConnection(onRemoteStream, onConnectionStateChange) {
+  async createPeerConnection(onRemoteStream, onConnectionStateChange, onError) {
+    if (this.isDestroyed) return null;
+
     try {
+      console.log('🔗 Creating peer connection...');
+      
       this.onRemoteStreamCallback = onRemoteStream;
       this.onConnectionStateChangeCallback = onConnectionStateChange;
+      this.onErrorCallback = onError;
       
       // Create peer connection
       this.peerConnection = new RTCPeerConnection(this.configuration);
-      console.log('Peer connection created');
+      console.log('✅ Peer connection created');
 
       // Add local stream tracks
       if (this.localStream) {
         this.localStream.getTracks().forEach(track => {
           this.peerConnection.addTrack(track, this.localStream);
-          console.log('Added local track:', track.kind);
+          console.log('➕ Added local track:', track.kind);
         });
       }
 
       // Handle remote stream
       this.peerConnection.ontrack = (event) => {
-        console.log('Received remote stream');
+        console.log('📡 Received remote track:', event.track.kind);
         const [remoteStream] = event.streams;
         this.remoteStream = remoteStream;
+        
         if (this.onRemoteStreamCallback) {
           this.onRemoteStreamCallback(remoteStream);
         }
@@ -173,24 +214,24 @@ export class WebRTCService {
       // Handle ICE candidates
       this.peerConnection.onicecandidate = (event) => {
         if (event.candidate) {
-          console.log('Sending ICE candidate:', event.candidate.type);
+          console.log('🧊 Sending ICE candidate:', event.candidate.type);
           this.sendSignal({
             type: 'ice-candidate',
             candidate: event.candidate,
             from: this.userId,
             timestamp: Date.now()
           }).catch(error => {
-            console.error('Failed to send ICE candidate:', error);
+            console.error('❌ Failed to send ICE candidate:', error);
           });
         } else {
-          console.log('ICE gathering completed');
+          console.log('✅ ICE gathering completed');
         }
       };
 
       // Enhanced connection state handling
       this.peerConnection.onconnectionstatechange = () => {
         const state = this.peerConnection.connectionState;
-        console.log('Connection state changed:', state);
+        console.log('🔌 Connection state changed:', state);
         
         if (this.onConnectionStateChangeCallback) {
           this.onConnectionStateChangeCallback(state);
@@ -198,69 +239,47 @@ export class WebRTCService {
 
         switch (state) {
           case 'connected':
-            console.log('Peer connection established successfully');
+            console.log('✅ Peer connection established');
             this.reconnectAttempts = 0;
             break;
           case 'disconnected':
-            console.log('Peer connection disconnected');
+            console.log('⚠️ Peer connection disconnected');
             this.handleDisconnection();
             break;
           case 'failed':
-            console.log('Peer connection failed');
+            console.log('❌ Peer connection failed');
             this.handleConnectionFailure();
             break;
           case 'closed':
-            console.log('Peer connection closed');
-            break;
-          default:
-            console.log('Connection state:', state);
+            console.log('🔒 Peer connection closed');
             break;
         }
       };
 
-      // Handle ICE connection state changes
+      // Handle ICE connection state
       this.peerConnection.oniceconnectionstatechange = () => {
         const state = this.peerConnection.iceConnectionState;
-        console.log('ICE connection state:', state);
+        console.log('🧊 ICE connection state:', state);
         
-        switch (state) {
-          case 'connected':
-          case 'completed':
-            console.log('ICE connection established');
-            break;
-          case 'disconnected':
-            console.log('ICE connection disconnected');
-            setTimeout(() => {
-              if (this.peerConnection?.iceConnectionState === 'disconnected') {
-                this.handleDisconnection();
-              }
-            }, 5000);
-            break;
-          case 'failed':
-            console.log('ICE connection failed');
-            this.handleConnectionFailure();
-            break;
-          default:
-            break;
+        if (state === 'connected' || state === 'completed') {
+          console.log('✅ ICE connection established');
+        } else if (state === 'failed') {
+          console.log('❌ ICE connection failed');
+          this.handleConnectionFailure();
         }
       };
 
-      // Handle signaling state changes
+      // Handle signaling state
       this.peerConnection.onsignalingstatechange = () => {
-        console.log('Signaling state:', this.peerConnection.signalingState);
-      };
-
-      // Handle ICE gathering state
-      this.peerConnection.onicegatheringstatechange = () => {
-        console.log('ICE gathering state:', this.peerConnection.iceGatheringState);
+        console.log('📡 Signaling state:', this.peerConnection.signalingState);
       };
 
       // Start listening for signals
       this.listenForSignals();
 
-      // Create offer if initiator (with delay for better connectivity)
+      // Create offer if initiator
       if (this.isInitiator) {
-        console.log('Creating offer as initiator');
+        console.log('🎯 Creating offer as initiator');
         setTimeout(() => {
           this.createOffer();
         }, 1000);
@@ -268,14 +287,19 @@ export class WebRTCService {
 
       return this.peerConnection;
     } catch (error) {
-      console.error('Error creating peer connection:', error);
-      throw new Error(`Failed to setup video connection: ${error.message}`);
+      console.error('❌ Error creating peer connection:', error);
+      if (this.onErrorCallback) {
+        this.onErrorCallback(`Failed to setup connection: ${error.message}`);
+      }
+      throw error;
     }
   }
 
   async createOffer() {
+    if (this.isDestroyed || !this.peerConnection) return;
+
     try {
-      console.log('Creating WebRTC offer...');
+      console.log('📝 Creating WebRTC offer...');
       const offer = await this.peerConnection.createOffer({
         offerToReceiveAudio: true,
         offerToReceiveVideo: true,
@@ -283,7 +307,7 @@ export class WebRTCService {
       });
       
       await this.peerConnection.setLocalDescription(offer);
-      console.log('Local description set');
+      console.log('✅ Local description set');
       
       await this.sendSignal({
         type: 'offer',
@@ -291,22 +315,26 @@ export class WebRTCService {
         from: this.userId,
         timestamp: Date.now()
       });
-      console.log('Offer sent');
+      console.log('📤 Offer sent');
     } catch (error) {
-      console.error('Error creating offer:', error);
-      throw new Error(`Failed to create connection offer: ${error.message}`);
+      console.error('❌ Error creating offer:', error);
+      if (this.onErrorCallback) {
+        this.onErrorCallback(`Failed to create offer: ${error.message}`);
+      }
     }
   }
 
   async createAnswer(offer) {
+    if (this.isDestroyed || !this.peerConnection) return;
+
     try {
-      console.log('Creating WebRTC answer...');
+      console.log('📝 Creating WebRTC answer...');
       await this.peerConnection.setRemoteDescription(new RTCSessionDescription(offer));
-      console.log('Remote description set');
+      console.log('✅ Remote description set');
       
       const answer = await this.peerConnection.createAnswer();
       await this.peerConnection.setLocalDescription(answer);
-      console.log('Local description set for answer');
+      console.log('✅ Local description set for answer');
       
       await this.sendSignal({
         type: 'answer',
@@ -314,14 +342,18 @@ export class WebRTCService {
         from: this.userId,
         timestamp: Date.now()
       });
-      console.log('Answer sent');
+      console.log('📤 Answer sent');
     } catch (error) {
-      console.error('Error creating answer:', error);
-      throw new Error(`Failed to create connection answer: ${error.message}`);
+      console.error('❌ Error creating answer:', error);
+      if (this.onErrorCallback) {
+        this.onErrorCallback(`Failed to create answer: ${error.message}`);
+      }
     }
   }
 
   async sendSignal(data) {
+    if (this.isDestroyed) return;
+
     try {
       if (!this.sessionId) {
         throw new Error('Session ID not available');
@@ -333,22 +365,22 @@ export class WebRTCService {
         timestamp: serverTimestamp()
       });
     } catch (error) {
-      console.error('Error sending signal:', error);
+      console.error('❌ Error sending signal:', error);
       // Don't throw here to avoid breaking the connection flow
     }
   }
 
   listenForSignals() {
-    if (!this.sessionId) {
-      console.error('Cannot listen for signals: No session ID');
+    if (this.isDestroyed || !this.sessionId) {
+      console.error('❌ Cannot listen for signals: Invalid state');
       return;
     }
 
     const signalRef = ref(realtimeDb, `sessions/${this.sessionId}/signals`);
     
-    this.signalListener = onValue(signalRef, async (snapshot) => {
+    this.signalListener = onValue(signalRef, (snapshot) => {
       const signals = snapshot.val();
-      if (signals) {
+      if (signals && !this.isDestroyed) {
         // Process only recent signals from other users
         const signalEntries = Object.entries(signals)
           .filter(([_, signal]) => 
@@ -359,25 +391,23 @@ export class WebRTCService {
           .sort((a, b) => (b[1].timestamp || 0) - (a[1].timestamp || 0));
 
         for (const [_, signal] of signalEntries) {
-          try {
-            await this.handleSignal(signal);
-          } catch (error) {
-            console.error('Error handling signal:', error);
-          }
+          this.handleSignal(signal).catch(error => {
+            console.error('❌ Error handling signal:', error);
+          });
         }
       }
     }, (error) => {
-      console.error('Error listening for signals:', error);
+      console.error('❌ Error listening for signals:', error);
     });
   }
 
   async handleSignal(signal) {
-    if (!this.peerConnection || signal.from === this.userId) return;
+    if (this.isDestroyed || !this.peerConnection || signal.from === this.userId) return;
 
     try {
       switch (signal.type) {
         case 'offer':
-          console.log('Received offer from', signal.from);
+          console.log('📨 Received offer from', signal.from);
           if (this.peerConnection.signalingState === 'stable' || 
               this.peerConnection.signalingState === 'have-local-offer') {
             await this.createAnswer(signal.offer);
@@ -385,78 +415,88 @@ export class WebRTCService {
           break;
 
         case 'answer':
-          console.log('Received answer from', signal.from);
+          console.log('📨 Received answer from', signal.from);
           if (this.peerConnection.signalingState === 'have-local-offer') {
             await this.peerConnection.setRemoteDescription(new RTCSessionDescription(signal.answer));
-            console.log('Remote description set from answer');
+            console.log('✅ Remote description set from answer');
           }
           break;
 
         case 'ice-candidate':
-          console.log('Received ICE candidate from', signal.from);
+          console.log('🧊 Received ICE candidate from', signal.from);
           if (this.peerConnection.remoteDescription && 
               this.peerConnection.remoteDescription.type) {
             try {
               await this.peerConnection.addIceCandidate(new RTCIceCandidate(signal.candidate));
             } catch (error) {
-              console.warn('Failed to add ICE candidate:', error);
+              console.warn('⚠️ Failed to add ICE candidate:', error.message);
             }
           } else {
-            console.warn('Received ICE candidate before remote description');
+            console.warn('⚠️ Received ICE candidate before remote description');
           }
           break;
 
         default:
-          console.log('Unknown signal type:', signal.type);
+          console.log('❓ Unknown signal type:', signal.type);
           break;
       }
     } catch (error) {
-      console.error('Error handling signal:', error);
+      console.error('❌ Error handling signal:', error);
     }
   }
 
   handleDisconnection() {
-    if (this.reconnectAttempts < this.maxReconnectAttempts) {
+    if (this.reconnectAttempts < this.maxReconnectAttempts && !this.isDestroyed) {
       this.reconnectAttempts++;
-      console.log(`Attempting reconnection ${this.reconnectAttempts}/${this.maxReconnectAttempts}`);
+      console.log(`🔄 Attempting reconnection ${this.reconnectAttempts}/${this.maxReconnectAttempts}`);
       
       setTimeout(() => {
-        this.attemptReconnect();
+        if (!this.isDestroyed) {
+          this.attemptReconnect();
+        }
       }, 2000 * this.reconnectAttempts); // Exponential backoff
     } else {
-      console.log('Max reconnection attempts reached');
-      if (this.onConnectionStateChangeCallback) {
+      console.log('❌ Max reconnection attempts reached');
+      if (this.onConnectionStateChangeCallback && !this.isDestroyed) {
         this.onConnectionStateChangeCallback('failed');
       }
     }
   }
 
   handleConnectionFailure() {
-    console.log('Connection failed, attempting ICE restart');
-    if (this.peerConnection && this.reconnectAttempts < this.maxReconnectAttempts) {
+    console.log('❌ Connection failed, attempting ICE restart');
+    if (this.peerConnection && this.reconnectAttempts < this.maxReconnectAttempts && !this.isDestroyed) {
       this.attemptReconnect();
     } else {
-      console.log('Max reconnection attempts reached after failure');
-      if (this.onConnectionStateChangeCallback) {
+      console.log('❌ Max reconnection attempts reached after failure');
+      if (this.onConnectionStateChangeCallback && !this.isDestroyed) {
         this.onConnectionStateChangeCallback('failed');
       }
     }
   }
 
   async attemptReconnect() {
+    if (this.isDestroyed) return;
+
     try {
       if (this.peerConnection && this.peerConnection.connectionState !== 'closed') {
-        console.log('Restarting ICE...');
-        await this.peerConnection.restartIce();
+        console.log('🔄 Restarting ICE...');
+        
+        // Try ICE restart
+        if (this.peerConnection.restartIce) {
+          this.peerConnection.restartIce();
+        }
         
         if (this.isInitiator) {
           setTimeout(() => {
-            this.createOffer();
+            if (!this.isDestroyed) {
+              this.createOffer();
+            }
           }, 1000);
         }
       }
     } catch (error) {
-      console.error('Reconnection attempt failed:', error);
+      console.error('❌ Reconnection attempt failed:', error);
       this.handleDisconnection();
     }
   }
@@ -482,7 +522,7 @@ export class WebRTCService {
   }
 
   async replaceVideoTrack(newVideoTrack) {
-    if (this.peerConnection && this.localStream) {
+    if (this.peerConnection && this.localStream && !this.isDestroyed) {
       const sender = this.peerConnection.getSenders().find(s => 
         s.track && s.track.kind === 'video'
       );
@@ -501,7 +541,7 @@ export class WebRTCService {
           
           return true;
         } catch (error) {
-          console.error('Failed to replace video track:', error);
+          console.error('❌ Failed to replace video track:', error);
           return false;
         }
       }
@@ -509,41 +549,8 @@ export class WebRTCService {
     return false;
   }
 
-  async switchCamera() {
-    try {
-      if (!this.localStream) return false;
-
-      const videoTrack = this.localStream.getVideoTracks()[0];
-      if (!videoTrack) return false;
-
-      const currentFacingMode = videoTrack.getSettings().facingMode;
-      const newFacingMode = currentFacingMode === 'user' ? 'environment' : 'user';
-
-      const newStream = await navigator.mediaDevices.getUserMedia({
-        video: { 
-          facingMode: newFacingMode,
-          width: { ideal: 1280 },
-          height: { ideal: 720 }
-        },
-        audio: false
-      });
-
-      const newVideoTrack = newStream.getVideoTracks()[0];
-      const success = await this.replaceVideoTrack(newVideoTrack);
-      
-      if (!success) {
-        newVideoTrack.stop();
-      }
-      
-      return success;
-    } catch (error) {
-      console.error('Error switching camera:', error);
-      return false;
-    }
-  }
-
   async getConnectionStats() {
-    if (!this.peerConnection) return null;
+    if (!this.peerConnection || this.isDestroyed) return null;
 
     try {
       const stats = await this.peerConnection.getStats();
@@ -582,13 +589,14 @@ export class WebRTCService {
 
       return result;
     } catch (error) {
-      console.error('Error getting connection stats:', error);
+      console.error('❌ Error getting connection stats:', error);
       return null;
     }
   }
 
   disconnect() {
-    console.log('Disconnecting WebRTC service');
+    console.log('🔌 Disconnecting WebRTC service');
+    this.isDestroyed = true;
 
     // Stop listening for signals
     if (this.signalListener && this.sessionId) {
@@ -622,7 +630,10 @@ export class WebRTCService {
     // Clear callbacks
     this.onRemoteStreamCallback = null;
     this.onConnectionStateChangeCallback = null;
+    this.onErrorCallback = null;
     this.reconnectAttempts = 0;
+
+    console.log('✅ WebRTC service disconnected');
   }
 
   // Static utility methods
@@ -633,7 +644,7 @@ export class WebRTCService {
       window.RTCPeerConnection
     );
     
-    const hasSecureContext = window.location.protocol === 'https:' || 
+    const hasSecureContext = window.isSecureContext || 
                              window.location.hostname === 'localhost' || 
                              window.location.hostname === '127.0.0.1';
     
@@ -656,7 +667,7 @@ export class WebRTCService {
         microphone: permissions[1].state
       };
     } catch (error) {
-      console.error('Error checking permissions:', error);
+      console.error('❌ Error checking permissions:', error);
       return { camera: 'prompt', microphone: 'prompt' };
     }
   }
@@ -674,7 +685,7 @@ export class WebRTCService {
         audioOutputs: devices.filter(device => device.kind === 'audiooutput')
       };
     } catch (error) {
-      console.error('Error getting devices:', error);
+      console.error('❌ Error getting devices:', error);
       return { audioInputs: [], videoInputs: [], audioOutputs: [] };
     }
   }
@@ -684,11 +695,16 @@ export class WebRTCService {
       browser: navigator.userAgent,
       platform: navigator.platform,
       webrtcSupported: this.isSupported(),
-      httpsEnabled: window.location.protocol === 'https:',
+      httpsEnabled: window.isSecureContext,
       localNetwork: (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1'),
-      isMobile: /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent)
+      isMobile: /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent),
+      connection: navigator.connection ? {
+        effectiveType: navigator.connection.effectiveType,
+        downlink: navigator.connection.downlink,
+        rtt: navigator.connection.rtt
+      } : null
     };
   }
 }
 
-export default WebRTCService;
+export default EnhancedWebRTCService;

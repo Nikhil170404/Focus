@@ -5,19 +5,23 @@ import { ref, push, onValue, off, set } from 'firebase/database';
 import { db, realtimeDb } from '../../config/firebase';
 import { useAuth } from '../../hooks/useAuth';
 import SessionTimer from './SessionTimer';
-import { FiMic, FiMicOff, FiVideo, FiVideoOff, FiPhoneOff, FiSettings, FiRefreshCw } from 'react-icons/fi';
+import SessionChat from './SessionChat';
+import { FiMic, FiMicOff, FiVideo, FiVideoOff, FiPhoneOff, FiSettings, FiRefreshCw, FiMaximize2 } from 'react-icons/fi';
 import toast from 'react-hot-toast';
 
 function VideoSession() {
   const { sessionId } = useParams();
   const { user } = useAuth();
   const navigate = useNavigate();
+  
+  // Video refs
   const localVideoRef = useRef(null);
   const remoteVideoRef = useRef(null);
   const peerConnectionRef = useRef(null);
   const localStreamRef = useRef(null);
   const signalListenerRef = useRef(null);
   
+  // State
   const [localStream, setLocalStream] = useState(null);
   const [remoteStream, setRemoteStream] = useState(null);
   const [isAudioEnabled, setIsAudioEnabled] = useState(true);
@@ -28,21 +32,24 @@ function VideoSession() {
   const [mediaError, setMediaError] = useState(null);
   const [isInitiator, setIsInitiator] = useState(false);
   const [reconnectAttempts, setReconnectAttempts] = useState(0);
-  const [showSettings, setShowSettings] = useState(false);
+  const [showChat, setShowChat] = useState(false);
+  const [isFullscreen, setIsFullscreen] = useState(false);
 
   // Enhanced STUN/TURN configuration for production
   const rtcConfiguration = {
     iceServers: [
+      // Google STUN servers - most reliable
       { urls: 'stun:stun.l.google.com:19302' },
       { urls: 'stun:stun1.l.google.com:19302' },
       { urls: 'stun:stun2.l.google.com:19302' },
       { urls: 'stun:stun3.l.google.com:19302' },
       { urls: 'stun:stun4.l.google.com:19302' },
+      
+      // Additional reliable STUN servers
       { urls: 'stun:stun.stunprotocol.org:3478' },
-      { urls: 'stun:stun.ekiga.net' },
-      { urls: 'stun:stun.fwdnet.net' },
-      { urls: 'stun:stun.ideasip.com' },
-      // Free TURN servers for backup
+      { urls: 'stun:stun.services.mozilla.com' },
+      
+      // Free TURN servers for NAT traversal
       {
         urls: 'turn:numb.viagenie.ca',
         credential: 'muazkh',
@@ -52,6 +59,13 @@ function VideoSession() {
         urls: 'turn:turn.anyfirewall.com:443?transport=tcp',
         credential: 'webrtc',
         username: 'webrtc'
+      },
+      
+      // Additional TURN server
+      {
+        urls: 'turn:openrelay.metered.ca:80',
+        credential: 'openrelayproject',
+        username: 'openrelayproject'
       }
     ],
     iceCandidatePoolSize: 10,
@@ -59,6 +73,7 @@ function VideoSession() {
     rtcpMuxPolicy: 'require'
   };
 
+  // Initialize session
   useEffect(() => {
     if (!sessionId || !user) {
       navigate('/dashboard');
@@ -73,13 +88,13 @@ function VideoSession() {
   }, [sessionId, user]);
 
   const cleanup = useCallback(() => {
-    console.log('Cleaning up video session...');
+    console.log('🧹 Cleaning up video session...');
     
     // Stop local stream
     if (localStreamRef.current) {
       localStreamRef.current.getTracks().forEach(track => {
         track.stop();
-        console.log('Stopped track:', track.kind);
+        console.log('⏹️ Stopped track:', track.kind);
       });
       localStreamRef.current = null;
     }
@@ -96,52 +111,48 @@ function VideoSession() {
       off(signalRef, 'value', signalListenerRef.current);
       signalListenerRef.current = null;
     }
+
+    // Clear state
+    setLocalStream(null);
+    setRemoteStream(null);
   }, [sessionId]);
 
   const initializeSession = async () => {
     try {
-      console.log('Initializing session:', sessionId);
+      console.log('🚀 Initializing session:', sessionId);
+      setConnectionStatus('Loading session...');
       
       // Get session data with real-time listener
       const sessionRef = doc(db, 'sessions', sessionId);
-      const unsubscribe = onSnapshot(sessionRef, (doc) => {
+      const unsubscribe = onSnapshot(sessionRef, async (doc) => {
         if (doc.exists()) {
           const sessionData = { id: doc.id, ...doc.data() };
           setSession(sessionData);
           
-          // Determine if user is initiator (person who created the session)
-          setIsInitiator(sessionData.userId === user.uid);
+          // Determine if user is initiator
+          const initiator = sessionData.userId === user.uid;
+          setIsInitiator(initiator);
           
-          console.log('Session data loaded:', sessionData);
+          console.log('📋 Session loaded:', { 
+            initiator, 
+            hasPartner: !!sessionData.partnerId,
+            status: sessionData.status 
+          });
+          
+          // Initialize media after session is loaded
+          if (!localStreamRef.current) {
+            await initializeMedia();
+            await setupWebRTC();
+          }
         } else {
-          toast.error('Session not found');
-          navigate('/dashboard');
+          throw new Error('Session not found');
         }
       });
 
-      // Check if browser supports WebRTC
-      if (!window.RTCPeerConnection) {
-        throw new Error('WebRTC is not supported in this browser');
-      }
-
-      // Check if we're on HTTPS or localhost
-      if (window.location.protocol !== 'https:' && window.location.hostname !== 'localhost') {
-        setMediaError('Video calling requires a secure connection (HTTPS)');
-        toast.error('Video calling requires HTTPS');
-      }
-
-      // Initialize media
-      await initializeMedia();
-      
-      // Setup WebRTC
-      await setupWebRTC();
-      
-      setLoading(false);
-      
       return () => unsubscribe();
       
     } catch (error) {
-      console.error('Error initializing session:', error);
+      console.error('❌ Error initializing session:', error);
       setMediaError(error.message);
       toast.error('Failed to initialize session: ' + error.message);
       setLoading(false);
@@ -150,18 +161,25 @@ function VideoSession() {
 
   const initializeMedia = async () => {
     try {
-      console.log('Requesting media permissions...');
-      setConnectionStatus('Requesting camera and microphone...');
+      console.log('🎥 Requesting media permissions...');
+      setConnectionStatus('Accessing camera and microphone...');
 
-      // Check for media devices
-      if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-        throw new Error('Media devices not supported');
+      // Check for HTTPS in production
+      if (window.location.protocol !== 'https:' && 
+          window.location.hostname !== 'localhost' && 
+          window.location.hostname !== '127.0.0.1') {
+        throw new Error('Camera access requires HTTPS connection');
       }
 
-      // Request permissions with fallback strategy
+      // Check browser support
+      if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+        throw new Error('Your browser does not support camera access');
+      }
+
       let stream;
+      
       try {
-        // Try high quality first
+        // High quality attempt
         stream = await navigator.mediaDevices.getUserMedia({
           video: {
             width: { ideal: 1280, max: 1920 },
@@ -172,19 +190,19 @@ function VideoSession() {
           audio: {
             echoCancellation: true,
             noiseSuppression: true,
-            autoGainControl: true,
-            sampleRate: { ideal: 44100 }
+            autoGainControl: true
           }
         });
-      } catch (highQualityError) {
-        console.warn('High quality failed, trying medium quality:', highQualityError);
+        console.log('✅ High quality media obtained');
+      } catch (error) {
+        console.warn('⚠️ High quality failed, trying medium:', error.message);
         
         try {
-          // Fallback to medium quality
+          // Medium quality fallback
           stream = await navigator.mediaDevices.getUserMedia({
             video: {
-              width: { ideal: 640 },
-              height: { ideal: 480 },
+              width: { ideal: 640, max: 1280 },
+              height: { ideal: 480, max: 720 },
               facingMode: 'user'
             },
             audio: {
@@ -192,38 +210,44 @@ function VideoSession() {
               noiseSuppression: true
             }
           });
-        } catch (mediumQualityError) {
-          console.warn('Medium quality failed, trying audio only:', mediumQualityError);
+          console.log('✅ Medium quality media obtained');
+        } catch (error2) {
+          console.warn('⚠️ Video failed, trying audio only:', error2.message);
           
-          // Last resort: audio only
+          // Audio only fallback
           stream = await navigator.mediaDevices.getUserMedia({
             audio: true
           });
           setIsVideoEnabled(false);
           toast.warning('Camera not available, audio-only mode');
+          console.log('✅ Audio-only media obtained');
         }
       }
       
+      // Store stream reference
       localStreamRef.current = stream;
       setLocalStream(stream);
       
+      // Attach to video element
       if (localVideoRef.current) {
         localVideoRef.current.srcObject = stream;
+        console.log('📺 Local video attached');
       }
       
-      console.log('Media initialized successfully');
       setConnectionStatus('Media ready');
       
     } catch (error) {
-      console.error('Media access error:', error);
+      console.error('❌ Media access error:', error);
       
       let errorMessage = 'Failed to access camera/microphone';
       if (error.name === 'NotAllowedError') {
-        errorMessage = 'Camera and microphone access denied. Please allow permissions and refresh.';
+        errorMessage = 'Camera access denied. Please allow permissions and refresh.';
       } else if (error.name === 'NotFoundError') {
-        errorMessage = 'No camera or microphone found. Please connect devices and try again.';
+        errorMessage = 'No camera or microphone found.';
       } else if (error.name === 'NotSupportedError') {
         errorMessage = 'Your browser does not support video calling.';
+      } else if (error.message.includes('HTTPS')) {
+        errorMessage = error.message;
       }
       
       setMediaError(errorMessage);
@@ -233,8 +257,8 @@ function VideoSession() {
 
   const setupWebRTC = async () => {
     try {
-      console.log('Setting up WebRTC...');
-      setConnectionStatus('Setting up connection...');
+      console.log('🔗 Setting up WebRTC...');
+      setConnectionStatus('Connecting to partner...');
 
       // Create peer connection
       peerConnectionRef.current = new RTCPeerConnection(rtcConfiguration);
@@ -244,70 +268,70 @@ function VideoSession() {
       if (localStreamRef.current) {
         localStreamRef.current.getTracks().forEach(track => {
           pc.addTrack(track, localStreamRef.current);
-          console.log('Added local track:', track.kind);
+          console.log('➕ Added local track:', track.kind);
         });
       }
 
       // Handle remote stream
       pc.ontrack = (event) => {
-        console.log('Received remote track:', event.track.kind);
+        console.log('📡 Received remote track:', event.track.kind);
         const [remoteStream] = event.streams;
         setRemoteStream(remoteStream);
         if (remoteVideoRef.current) {
           remoteVideoRef.current.srcObject = remoteStream;
+          console.log('📺 Remote video attached');
         }
         setConnectionStatus('Connected');
+        toast.success('Connected to your study partner!');
       };
 
       // Handle ICE candidates
       pc.onicecandidate = (event) => {
         if (event.candidate) {
-          console.log('Sending ICE candidate');
+          console.log('🧊 Sending ICE candidate');
           sendSignal({
             type: 'ice-candidate',
             candidate: event.candidate,
             from: user.uid,
             timestamp: Date.now()
           });
-        } else {
-          console.log('ICE gathering complete');
         }
       };
 
       // Handle connection state changes
       pc.onconnectionstatechange = () => {
         const state = pc.connectionState;
-        console.log('Connection state:', state);
+        console.log('🔌 Connection state:', state);
+        
         setConnectionStatus(getConnectionStatusText(state));
         
-        if (state === 'failed') {
+        if (state === 'connected') {
+          setReconnectAttempts(0);
+          setLoading(false);
+        } else if (state === 'failed') {
           handleConnectionFailure();
         } else if (state === 'disconnected') {
           handleDisconnection();
-        } else if (state === 'connected') {
-          setReconnectAttempts(0);
-          toast.success('Connected to partner!');
         }
-      };
-
-      // Handle ICE connection state
-      pc.oniceconnectionstatechange = () => {
-        console.log('ICE connection state:', pc.iceConnectionState);
       };
 
       // Setup signaling
       setupSignaling();
 
-      // If user is initiator, create offer after a short delay
+      // Create offer if initiator
       if (isInitiator) {
+        console.log('🎯 Creating offer as initiator');
         setTimeout(() => {
           createOffer();
         }, 1000);
       }
 
+      setLoading(false);
+
     } catch (error) {
-      console.error('WebRTC setup error:', error);
-      throw error;
+      console.error('❌ WebRTC setup error:', error);
+      setMediaError('Failed to setup video connection: ' + error.message);
+      setLoading(false);
     }
   };
 
@@ -318,7 +342,10 @@ function VideoSession() {
       const signals = snapshot.val();
       if (signals) {
         Object.entries(signals).forEach(([key, signal]) => {
-          if (signal.from !== user.uid && signal.timestamp > Date.now() - 60000) {
+          // Only process recent signals from other users
+          if (signal.from !== user.uid && 
+              signal.timestamp && 
+              Date.now() - signal.timestamp < 30000) {
             handleRemoteSignal(signal);
           }
         });
@@ -334,7 +361,7 @@ function VideoSession() {
         timestamp: Date.now()
       });
     } catch (error) {
-      console.error('Error sending signal:', error);
+      console.error('❌ Error sending signal:', error);
     }
   };
 
@@ -345,34 +372,35 @@ function VideoSession() {
     try {
       switch (signal.type) {
         case 'offer':
-          console.log('Received offer');
-          await pc.setRemoteDescription(new RTCSessionDescription(signal.offer));
-          const answer = await pc.createAnswer();
-          await pc.setLocalDescription(answer);
-          await sendSignal({
-            type: 'answer',
-            answer: answer,
-            from: user.uid
-          });
+          console.log('📨 Received offer');
+          if (pc.signalingState === 'stable' || pc.signalingState === 'have-local-offer') {
+            await pc.setRemoteDescription(new RTCSessionDescription(signal.offer));
+            const answer = await pc.createAnswer();
+            await pc.setLocalDescription(answer);
+            await sendSignal({
+              type: 'answer',
+              answer: answer,
+              from: user.uid
+            });
+          }
           break;
 
         case 'answer':
-          console.log('Received answer');
-          await pc.setRemoteDescription(new RTCSessionDescription(signal.answer));
+          console.log('📨 Received answer');
+          if (pc.signalingState === 'have-local-offer') {
+            await pc.setRemoteDescription(new RTCSessionDescription(signal.answer));
+          }
           break;
 
         case 'ice-candidate':
-          console.log('Received ICE candidate');
+          console.log('🧊 Received ICE candidate');
           if (pc.remoteDescription) {
             await pc.addIceCandidate(new RTCIceCandidate(signal.candidate));
           }
           break;
-
-        default:
-          console.log('Unknown signal type:', signal.type);
       }
     } catch (error) {
-      console.error('Error handling signal:', error);
+      console.error('❌ Error handling signal:', error);
     }
   };
 
@@ -381,7 +409,7 @@ function VideoSession() {
     if (!pc) return;
 
     try {
-      console.log('Creating offer...');
+      console.log('📝 Creating offer...');
       const offer = await pc.createOffer({
         offerToReceiveAudio: true,
         offerToReceiveVideo: true
@@ -393,7 +421,7 @@ function VideoSession() {
         from: user.uid
       });
     } catch (error) {
-      console.error('Error creating offer:', error);
+      console.error('❌ Error creating offer:', error);
     }
   };
 
@@ -419,7 +447,7 @@ function VideoSession() {
         }
       }, 2000 * (reconnectAttempts + 1));
     } else {
-      toast.error('Unable to connect to partner. Please refresh and try again.');
+      toast.error('Unable to connect. Please refresh and try again.');
     }
   };
 
@@ -434,6 +462,7 @@ function VideoSession() {
         track.enabled = !isAudioEnabled;
       });
       setIsAudioEnabled(!isAudioEnabled);
+      toast.success(isAudioEnabled ? 'Microphone muted' : 'Microphone unmuted');
     }
   };
 
@@ -443,13 +472,17 @@ function VideoSession() {
         track.enabled = !isVideoEnabled;
       });
       setIsVideoEnabled(!isVideoEnabled);
+      toast.success(isVideoEnabled ? 'Camera turned off' : 'Camera turned on');
     }
   };
 
   const reconnect = async () => {
     setConnectionStatus('Reconnecting...');
+    setReconnectAttempts(0);
     cleanup();
-    await initializeSession();
+    setTimeout(() => {
+      initializeSession();
+    }, 1000);
   };
 
   const endSession = async () => {
@@ -465,7 +498,7 @@ function VideoSession() {
           });
         }
 
-        toast.success('Session completed!');
+        toast.success('Session completed! Great work! 🎉');
         navigate('/dashboard');
       } catch (error) {
         console.error('Error ending session:', error);
@@ -475,35 +508,65 @@ function VideoSession() {
   };
 
   const onTimerComplete = () => {
-    toast.success('Session time completed! Great work!');
+    toast.success('Session time completed! Excellent focus! 🎯');
     setTimeout(() => {
       endSession();
     }, 3000);
   };
 
+  const toggleFullscreen = () => {
+    setIsFullscreen(!isFullscreen);
+  };
+
+  const toggleChat = () => {
+    setShowChat(!showChat);
+  };
+
+  // Loading state
   if (loading) {
     return (
-      <div className="loading-container">
-        <div className="spinner"></div>
-        <p>Setting up your session...</p>
-        <p className="text-sm">{connectionStatus}</p>
+      <div className="video-session-loading">
+        <div className="loading-container">
+          <div className="spinner large"></div>
+          <h3>Setting up your focus session...</h3>
+          <p className="status-text">{connectionStatus}</p>
+          {mediaError && (
+            <div className="error-message">
+              <p>{mediaError}</p>
+              <button onClick={() => window.location.reload()} className="btn-primary">
+                <FiRefreshCw /> Refresh & Try Again
+              </button>
+            </div>
+          )}
+        </div>
       </div>
     );
   }
 
+  // Error state
   if (mediaError) {
     return (
-      <div className="video-session-page">
+      <div className="video-session-error">
         <div className="error-container">
-          <h2>Media Access Error</h2>
+          <h2>Unable to Start Video Session</h2>
           <p>{mediaError}</p>
           <div className="error-actions">
             <button onClick={() => window.location.reload()} className="btn-primary">
-              <FiRefreshCw /> Refresh & Try Again
+              <FiRefreshCw /> Try Again
             </button>
             <button onClick={() => navigate('/dashboard')} className="btn-secondary">
               Back to Dashboard
             </button>
+          </div>
+          
+          <div className="help-tips">
+            <h4>Troubleshooting Tips:</h4>
+            <ul>
+              <li>• Make sure you're using Chrome, Firefox, Safari, or Edge</li>
+              <li>• Allow camera and microphone permissions</li>
+              <li>• Check that your camera isn't being used by another app</li>
+              <li>• Ensure you have a stable internet connection</li>
+            </ul>
           </div>
         </div>
       </div>
@@ -511,133 +574,156 @@ function VideoSession() {
   }
 
   return (
-    <div className="video-session-page">
-      <div className="video-container">
-        {/* Session Info */}
-        <div className="session-header">
-          <div className="session-info">
-            <h3>{session?.goal || 'Focus Session'}</h3>
+    <div className={`video-session-page ${isFullscreen ? 'fullscreen' : ''}`}>
+      {/* Session Header */}
+      <div className="session-header">
+        <div className="session-info">
+          <h3>{session?.goal || 'Focus Session'}</h3>
+          <div className="session-status">
             <span className="status-indicator">{connectionStatus}</span>
+            {session?.partnerName && (
+              <span className="partner-info">
+                👥 with {session.partnerName}
+              </span>
+            )}
           </div>
-          <div className="session-actions">
-            <button className="fullscreen-btn" onClick={() => setShowSettings(!showSettings)}>
-              <FiSettings />
+        </div>
+        <div className="session-actions">
+          <button className="header-btn" onClick={toggleChat} title="Toggle Chat">
+            💬 {showChat ? 'Hide' : 'Chat'}
+          </button>
+          <button className="header-btn" onClick={toggleFullscreen} title="Toggle Fullscreen">
+            <FiMaximize2 />
+          </button>
+        </div>
+      </div>
+
+      <div className="session-content">
+        {/* Videos Grid */}
+        <div className="videos-container">
+          <div className="videos-grid">
+            {/* Local Video */}
+            <div className="video-box local">
+              <video
+                ref={localVideoRef}
+                autoPlay
+                muted
+                playsInline
+                className="video-stream"
+              />
+              <div className="video-label">You {!isVideoEnabled && '(Camera Off)'}</div>
+              {!isVideoEnabled && (
+                <div className="video-disabled">
+                  <div className="avatar-placeholder">
+                    {user?.displayName?.charAt(0) || 'U'}
+                  </div>
+                </div>
+              )}
+              {!isAudioEnabled && (
+                <div className="muted-indicator">🔇</div>
+              )}
+            </div>
+
+            {/* Remote Video */}
+            <div className="video-box remote">
+              <video
+                ref={remoteVideoRef}
+                autoPlay
+                playsInline
+                className="video-stream"
+              />
+              <div className="video-label">
+                {session?.partnerName || 'Waiting for partner...'}
+              </div>
+              {!remoteStream && (
+                <div className="video-placeholder">
+                  <div className="connection-status">
+                    <div className="spinner"></div>
+                    <p>Connecting to your study partner...</p>
+                    <small>This usually takes a few seconds</small>
+                  </div>
+                </div>
+              )}
+            </div>
+          </div>
+
+          {/* Controls Bar */}
+          <div className="controls-bar">
+            <button
+              className={`control-button ${!isAudioEnabled ? 'muted' : ''}`}
+              onClick={toggleAudio}
+              title={isAudioEnabled ? 'Mute' : 'Unmute'}
+            >
+              {isAudioEnabled ? <FiMic /> : <FiMicOff />}
+            </button>
+
+            <button
+              className={`control-button ${!isVideoEnabled ? 'muted' : ''}`}
+              onClick={toggleVideo}
+              title={isVideoEnabled ? 'Turn off camera' : 'Turn on camera'}
+            >
+              {isVideoEnabled ? <FiVideo /> : <FiVideoOff />}
+            </button>
+
+            <button
+              className="control-button"
+              onClick={reconnect}
+              title="Reconnect"
+            >
+              <FiRefreshCw />
+            </button>
+
+            <button
+              className="control-button end-call"
+              onClick={endSession}
+              title="End session"
+            >
+              <FiPhoneOff />
             </button>
           </div>
         </div>
 
-        {/* Videos */}
-        <div className="videos-grid">
-          <div className="video-box">
-            <video
-              ref={localVideoRef}
-              autoPlay
-              muted
-              playsInline
-              className="video-stream"
+        {/* Sidebar */}
+        <div className={`session-sidebar ${showChat ? 'show-chat' : ''}`}>
+          {/* Timer */}
+          <div className="timer-section">
+            <SessionTimer 
+              duration={session?.duration || 50} 
+              onComplete={onTimerComplete}
+              autoStart={true}
             />
-            <div className="video-label">You</div>
-            {!isVideoEnabled && (
-              <div className="video-disabled">
-                <div className="avatar-placeholder">
-                  {user?.displayName?.charAt(0) || 'U'}
-                </div>
-                <p>Camera Off</p>
-              </div>
-            )}
           </div>
 
-          <div className="video-box">
-            <video
-              ref={remoteVideoRef}
-              autoPlay
-              playsInline
-              className="video-stream"
-            />
-            <div className="video-label">
-              {session?.partnerName || 'Waiting for partner...'}
+          {/* Session Details */}
+          <div className="session-details">
+            <div className="detail-item">
+              <span>Goal:</span>
+              <p>{session?.goal || 'Stay focused and productive'}</p>
             </div>
-            {!remoteStream && (
-              <div className="video-placeholder">
-                <div className="spinner"></div>
-                <p>Connecting...</p>
-              </div>
-            )}
+            <div className="detail-item">
+              <span>Duration:</span>
+              <p>{session?.duration || 50} minutes</p>
+            </div>
+            <div className="detail-item">
+              <span>Status:</span>
+              <p className={connectionStatus === 'Connected' ? 'status-active' : ''}>
+                {connectionStatus}
+              </p>
+            </div>
           </div>
-        </div>
 
-        {/* Controls */}
-        <div className="controls-bar">
-          <button
-            className={`control-button ${!isAudioEnabled ? 'muted' : ''}`}
-            onClick={toggleAudio}
-            title={isAudioEnabled ? 'Mute' : 'Unmute'}
-          >
-            {isAudioEnabled ? <FiMic /> : <FiMicOff />}
-          </button>
-
-          <button
-            className={`control-button ${!isVideoEnabled ? 'muted' : ''}`}
-            onClick={toggleVideo}
-            title={isVideoEnabled ? 'Turn off camera' : 'Turn on camera'}
-          >
-            {isVideoEnabled ? <FiVideo /> : <FiVideoOff />}
-          </button>
-
-          <button
-            className="control-button"
-            onClick={reconnect}
-            title="Reconnect"
-          >
-            <FiRefreshCw />
-          </button>
-
-          <button
-            className="control-button end-call"
-            onClick={endSession}
-            title="End session"
-          >
-            <FiPhoneOff />
-          </button>
-        </div>
-
-        {/* Debug info for development */}
-        {process.env.NODE_ENV === 'development' && showSettings && (
-          <div className="debug-info">
-            <h4>Debug Info</h4>
-            <p>Is Initiator: {isInitiator ? 'Yes' : 'No'}</p>
-            <p>Connection Status: {connectionStatus}</p>
-            <p>Reconnect Attempts: {reconnectAttempts}</p>
-            <p>Local Stream: {localStream ? 'Active' : 'None'}</p>
-            <p>Remote Stream: {remoteStream ? 'Active' : 'None'}</p>
-          </div>
-        )}
-      </div>
-
-      {/* Timer Sidebar */}
-      <div className="timer-sidebar">
-        <h3>Focus Timer</h3>
-        <SessionTimer 
-          duration={session?.duration || 50} 
-          onComplete={onTimerComplete}
-          autoStart={true}
-        />
-        
-        <div className="session-details">
-          <div className="detail-item">
-            <span>Goal:</span>
-            <p>{session?.goal || 'Stay focused'}</p>
-          </div>
-          <div className="detail-item">
-            <span>Duration:</span>
-            <p>{session?.duration || 50} minutes</p>
-          </div>
-          <div className="detail-item">
-            <span>Status:</span>
-            <p className={connectionStatus === 'Connected' ? 'status-active' : ''}>
-              {connectionStatus}
-            </p>
-          </div>
+          {/* Chat */}
+          {showChat && (
+            <div className="chat-section">
+              <SessionChat
+                sessionId={sessionId}
+                userId={user.uid}
+                userName={user.displayName || 'You'}
+                partnerId={session?.partnerId}
+                partnerName={session?.partnerName}
+              />
+            </div>
+          )}
         </div>
       </div>
     </div>
