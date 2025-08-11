@@ -146,6 +146,35 @@ function UserProfile() {
     }
   ];
 
+  // Safe date formatting function
+  const formatSafeDate = (dateValue, formatString = 'MMMM yyyy') => {
+    try {
+      let date;
+      if (!dateValue) {
+        date = new Date();
+      } else if (dateValue.toDate && typeof dateValue.toDate === 'function') {
+        // Firestore timestamp
+        date = dateValue.toDate();
+      } else if (dateValue.seconds) {
+        // Firestore timestamp object
+        date = new Date(dateValue.seconds * 1000);
+      } else {
+        // Regular date or string
+        date = new Date(dateValue);
+      }
+      
+      // Check if date is valid
+      if (isNaN(date.getTime())) {
+        return format(new Date(), formatString);
+      }
+      
+      return format(date, formatString);
+    } catch (error) {
+      console.error('Date formatting error:', error);
+      return format(new Date(), formatString);
+    }
+  };
+
   if (loading) {
     return (
       <div className="loading-container">
@@ -266,7 +295,7 @@ function UserProfile() {
                   </div>
                 )}
                 <div className="detail-item">
-                  <FiCalendar /> Joined {format(new Date(userData?.createdAt || Date.now()), 'MMMM yyyy')}
+                  <FiCalendar /> Joined {formatSafeDate(userData?.createdAt)}
                 </div>
               </div>
             </div>
