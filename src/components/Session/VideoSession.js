@@ -27,6 +27,8 @@ function VideoSession() {
   const apiRef = useRef(null);
   const scriptLoadedRef = useRef(false);
   const initializationRef = useRef(false);
+  const sessionListenerRef = useRef(null);
+  const mountedRef = useRef(true);
   
   const [session, setSession] = useState(null);
   const [loading, setLoading] = useState(true);
@@ -42,10 +44,18 @@ function VideoSession() {
   const [sessionStarted, setSessionStarted] = useState(false);
   const [timerStarted, setTimerStarted] = useState(false);
 
+  // Component mount/unmount tracking
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
+
   // Force loading to false after 5 seconds maximum
   useEffect(() => {
     const loadingTimeout = setTimeout(() => {
-      if (loading) {
+      if (loading && mountedRef.current) {
         console.log('Force stopping loading after 5 seconds');
         setLoading(false);
         setJitsiReady(true);
@@ -88,19 +98,21 @@ function VideoSession() {
     }
   }, [sessionId, session, navigate]);
 
-  // Setup event listeners for Jitsi API
+  // Setup event listeners for Jitsi API - simplified
   const setupEventListeners = useCallback(() => {
-    if (!apiRef.current) return;
+    if (!apiRef.current || !mountedRef.current) return;
 
     console.log('Setting up Jitsi event listeners');
 
     try {
       apiRef.current.on('audioMuteStatusChanged', (status) => {
+        if (!mountedRef.current) return;
         console.log('Audio mute status:', status.muted);
         setIsAudioMuted(status.muted);
       });
 
       apiRef.current.on('videoMuteStatusChanged', (status) => {
+        if (!mountedRef.current) return;
         console.log('Video mute status:', status.muted);
         setIsVideoMuted(status.muted);
       });
@@ -111,6 +123,7 @@ function VideoSession() {
       });
 
       apiRef.current.on('participantJoined', (participant) => {
+        if (!mountedRef.current) return;
         console.log('Participant joined:', participant);
         setConnectionStatus('connected');
         setPartnerConnected(true);
@@ -121,14 +134,15 @@ function VideoSession() {
           setTimerStarted(true);
         }
         
-        if (participant.id !== user.uid) {
+        if (participant.id !== user?.uid) {
           toast.success(`${participant.displayName || 'Study partner'} joined! 🎉`);
         }
       });
 
       apiRef.current.on('participantLeft', (participant) => {
+        if (!mountedRef.current) return;
         console.log('Participant left:', participant);
-        if (participant.id !== user.uid) {
+        if (participant.id !== user?.uid) {
           setPartnerConnected(false);
           toast(`${participant.displayName || 'Study partner'} left the session`);
           setConnectionStatus('waiting');
@@ -136,6 +150,7 @@ function VideoSession() {
       });
 
       apiRef.current.on('videoConferenceJoined', () => {
+        if (!mountedRef.current) return;
         console.log('Successfully joined video conference');
         setConnectionStatus('connected');
         setError(null);
@@ -151,12 +166,14 @@ function VideoSession() {
       });
 
       apiRef.current.on('videoConferenceLeft', () => {
+        if (!mountedRef.current) return;
         console.log('Left video conference');
         setConnectionStatus('disconnected');
       });
 
       // Conference error handling
       apiRef.current.on('conferenceError', (error) => {
+        if (!mountedRef.current) return;
         console.error('Conference error:', error);
         setError('Failed to join conference. Please try again.');
         setLoading(false);
@@ -164,13 +181,13 @@ function VideoSession() {
     } catch (error) {
       console.error('Error setting up event listeners:', error);
     }
-  }, [user.uid, endSession, sessionStarted]);
+  }, [endSession, user?.uid, sessionStarted]);
 
-  // Initialize Jitsi Meet
+  // Initialize Jitsi Meet - simplified and only call once
   const initializeJitsi = useCallback((sessionData) => {
     // Prevent multiple initializations
-    if (initializationRef.current) {
-      console.log('Jitsi already initializing or initialized');
+    if (initializationRef.current || !mountedRef.current) {
+      console.log('Jitsi already initializing or component unmounted');
       return;
     }
 
@@ -257,6 +274,7 @@ function VideoSession() {
       script.async = true;
       
       script.onload = () => {
+        if (!mountedRef.current) return;
         console.log('Jitsi script loaded successfully');
         
         try {
@@ -271,6 +289,7 @@ function VideoSession() {
           
           // Initialize Jitsi
           setTimeout(() => {
+            if (!mountedRef.current) return;
             try {
               apiRef.current = new window.JitsiMeetExternalAPI(domain, options);
               setupEventListeners();
@@ -278,6 +297,7 @@ function VideoSession() {
               
               // Set a timeout to handle cases where Jitsi doesn't load
               setTimeout(() => {
+                if (!mountedRef.current) return;
                 setLoading(false);
                 setJitsiReady(true);
                 setConnectionStatus('waiting');
@@ -289,17 +309,34 @@ function VideoSession() {
               }, 3000);
             } catch (error) {
               console.error('Error initializing Jitsi:', error);
-              setLoading(false);
-              setJitsiReady(true);
-              if (!sessionStarted) {
-                setSessionStarted(true);
-                setTimerStarted(true);
+              if (mountedRef.current) {
+                setLoading(false);
+                setJitsiReady(true);
+                if (!sessionStarted) {
+                  setSessionStarted(true);
+                  setTimerStarted(true);
+                }
               }
             }
           }, 100);
           
         } catch (error) {
           console.error('Error initializing Jitsi:', error);
+          if (mountedRef.current) {
+            setLoading(false);
+            setJitsiReady(true);
+            if (!sessionStarted) {
+              setSessionStarted(true);
+              setTimerStarted(true);
+            }
+            initializationRef.current = false;
+          }
+        }
+      };
+      
+      script.onerror = (error) => {
+        console.error('Failed to load Jitsi script:', error);
+        if (mountedRef.current) {
           setLoading(false);
           setJitsiReady(true);
           if (!sessionStarted) {
@@ -308,17 +345,6 @@ function VideoSession() {
           }
           initializationRef.current = false;
         }
-      };
-      
-      script.onerror = (error) => {
-        console.error('Failed to load Jitsi script:', error);
-        setLoading(false);
-        setJitsiReady(true);
-        if (!sessionStarted) {
-          setSessionStarted(true);
-          setTimerStarted(true);
-        }
-        initializationRef.current = false;
       };
       
       document.body.appendChild(script);
@@ -338,6 +364,7 @@ function VideoSession() {
         
         // Initialize Jitsi
         setTimeout(() => {
+          if (!mountedRef.current) return;
           try {
             apiRef.current = new window.JitsiMeetExternalAPI(domain, options);
             setupEventListeners();
@@ -345,6 +372,7 @@ function VideoSession() {
             
             // Set a timeout to handle cases where Jitsi doesn't load
             setTimeout(() => {
+              if (!mountedRef.current) return;
               setLoading(false);
               setJitsiReady(true);
               setConnectionStatus('waiting');
@@ -356,31 +384,35 @@ function VideoSession() {
             }, 3000);
           } catch (error) {
             console.error('Error initializing Jitsi:', error);
-            setLoading(false);
-            setJitsiReady(true);
-            if (!sessionStarted) {
-              setSessionStarted(true);
-              setTimerStarted(true);
+            if (mountedRef.current) {
+              setLoading(false);
+              setJitsiReady(true);
+              if (!sessionStarted) {
+                setSessionStarted(true);
+                setTimerStarted(true);
+              }
             }
           }
         }, 100);
         
       } catch (error) {
         console.error('Error initializing Jitsi:', error);
-        setLoading(false);
-        setJitsiReady(true);
-        if (!sessionStarted) {
-          setSessionStarted(true);
-          setTimerStarted(true);
+        if (mountedRef.current) {
+          setLoading(false);
+          setJitsiReady(true);
+          if (!sessionStarted) {
+            setSessionStarted(true);
+            setTimerStarted(true);
+          }
+          initializationRef.current = false;
         }
-        initializationRef.current = false;
       }
     }
   }, [sessionId, user, setupEventListeners, sessionStarted]);
 
-  // Retry connection function
+  // Retry connection function - simplified
   const retryConnection = useCallback(() => {
-    if (retryAttempts >= 3) {
+    if (retryAttempts >= 3 || !mountedRef.current) {
       setError('Maximum retry attempts reached. Please refresh the page.');
       return;
     }
@@ -390,6 +422,8 @@ function VideoSession() {
     setLoading(true);
     setJitsiReady(false);
     setConnectionStatus('connecting');
+    
+    // Reset initialization flag
     initializationRef.current = false;
     
     // Dispose existing instance
@@ -407,9 +441,9 @@ function VideoSession() {
     
     // Retry initialization
     setTimeout(() => {
-      if (session) {
+      if (session && mountedRef.current) {
         initializeJitsi(session);
-      } else {
+      } else if (mountedRef.current) {
         setLoading(false);
         setJitsiReady(true);
         if (!sessionStarted) {
@@ -418,13 +452,19 @@ function VideoSession() {
         }
       }
     }, 1000);
-  }, [retryAttempts, session, initializeJitsi, sessionStarted]);
+  }, [retryAttempts, session, sessionStarted, initializeJitsi]);
 
-  // Main effect for session management
+  // Main effect for session management - SIMPLIFIED to prevent infinite loop
   useEffect(() => {
-    if (!sessionId || !user) {
+    if (!sessionId || !user || !mountedRef.current) {
       console.log('Missing sessionId or user, redirecting to dashboard');
       navigate('/dashboard');
+      return;
+    }
+
+    // Prevent multiple listeners
+    if (sessionListenerRef.current) {
+      console.log('Session listener already exists, skipping setup');
       return;
     }
 
@@ -432,19 +472,23 @@ function VideoSession() {
 
     // Set a timeout to force loading to stop
     const forceLoadingTimeout = setTimeout(() => {
-      console.log('Forcing loading to stop due to timeout');
-      setLoading(false);
-      setJitsiReady(true);
-      if (!sessionStarted) {
-        setSessionStarted(true);
-        setTimerStarted(true);
+      if (mountedRef.current) {
+        console.log('Forcing loading to stop due to timeout');
+        setLoading(false);
+        setJitsiReady(true);
+        if (!sessionStarted) {
+          setSessionStarted(true);
+          setTimerStarted(true);
+        }
       }
     }, 8000);
 
-    // Listen to session changes
-    const unsubscribe = onSnapshot(
+    // Listen to session changes - ONLY ONCE
+    sessionListenerRef.current = onSnapshot(
       doc(db, 'sessions', sessionId), 
       (doc) => {
+        if (!mountedRef.current) return;
+        
         console.log('Session snapshot received:', doc.exists());
         
         if (doc.exists()) {
@@ -462,21 +506,25 @@ function VideoSession() {
           
           setSession(sessionData);
           
-          // Initialize Jitsi when container is ready and we have session data
-          if (jitsiContainerRef.current && !initializationRef.current) {
+          // Initialize Jitsi ONLY ONCE when container is ready and we have session data
+          if (jitsiContainerRef.current && !initializationRef.current && mountedRef.current) {
             console.log('Initializing Jitsi with session data');
             // Small delay to ensure everything is ready
             setTimeout(() => {
-              initializeJitsi(sessionData);
+              if (mountedRef.current) {
+                initializeJitsi(sessionData);
+              }
             }, 500);
-          } else {
-            // If Jitsi container is not ready, still stop loading
+          } else if (!initializationRef.current) {
+            // If Jitsi container is not ready, still stop loading after some time
             setTimeout(() => {
-              setLoading(false);
-              setJitsiReady(true);
-              if (!sessionStarted) {
-                setSessionStarted(true);
-                setTimerStarted(true);
+              if (mountedRef.current) {
+                setLoading(false);
+                setJitsiReady(true);
+                if (!sessionStarted) {
+                  setSessionStarted(true);
+                  setTimerStarted(true);
+                }
               }
             }, 2000);
           }
@@ -488,6 +536,7 @@ function VideoSession() {
         }
       },
       (error) => {
+        if (!mountedRef.current) return;
         console.error('Error listening to session:', error);
         setError(`Error loading session: ${error.message}`);
         setLoading(false);
@@ -497,7 +546,10 @@ function VideoSession() {
 
     return () => {
       clearTimeout(forceLoadingTimeout);
-      unsubscribe();
+      if (sessionListenerRef.current) {
+        sessionListenerRef.current();
+        sessionListenerRef.current = null;
+      }
       if (apiRef.current) {
         try {
           apiRef.current.dispose();
@@ -508,7 +560,7 @@ function VideoSession() {
       }
       initializationRef.current = false;
     };
-  }, [sessionId, user, navigate, initializeJitsi, sessionStarted]);
+  }, [sessionId, user?.uid]); // MINIMAL dependencies to prevent infinite loop
 
   // Handle fullscreen changes
   useEffect(() => {
