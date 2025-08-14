@@ -2,23 +2,20 @@ import React, { useState, useEffect, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { 
   collection, 
-  addDoc, 
   query, 
   where, 
   getDocs, 
-  updateDoc, 
-  doc, 
   serverTimestamp,
   onSnapshot,
   limit,
   orderBy,
   runTransaction,
-  getDoc,
-  setDoc
+  doc,
+  Timestamp
 } from 'firebase/firestore';
 import { db } from '../../config/firebase';
 import { useAuth } from '../../hooks/useAuth';
-import { addDays, addHours, format, isToday, isTomorrow, endOfDay } from 'date-fns';
+import { addDays, addHours, format, isToday, isTomorrow } from 'date-fns';
 import { FiCalendar, FiClock, FiTarget, FiArrowLeft, FiUsers, FiZap } from 'react-icons/fi';
 import toast from 'react-hot-toast';
 
@@ -126,8 +123,8 @@ function SessionBooking() {
       const startOfDay = new Date(selectedDate);
       startOfDay.setHours(0, 0, 0, 0);
       
-      const endOfDay = new Date(selectedDate);
-      endOfDay.setHours(23, 59, 59, 999);
+      const endOfDayTime = new Date(selectedDate);
+      endOfDayTime.setHours(23, 59, 59, 999);
       
       // Query time slots for this date
       const dayString = format(selectedDate, 'yyyy-MM-dd');
@@ -257,6 +254,9 @@ function SessionBooking() {
           // Create session
           transaction.set(sessionRef, newSessionData);
           
+          // Use Timestamp.now() instead of serverTimestamp() inside arrays
+          const currentTime = Timestamp.now();
+          
           // Create time slot
           transaction.set(timeSlotRef, {
             slotId: slotId,
@@ -269,7 +269,7 @@ function SessionBooking() {
               userId: user.uid,
               userName: user.displayName || user.email?.split('@')[0] || 'User',
               userPhoto: user.photoURL || null,
-              joinedAt: serverTimestamp()
+              joinedAt: currentTime
             }],
             createdAt: serverTimestamp()
           });
@@ -311,6 +311,9 @@ function SessionBooking() {
             updatedAt: serverTimestamp()
           });
           
+          // Use Timestamp.now() instead of serverTimestamp() inside arrays
+          const currentTime = Timestamp.now();
+          
           // Update time slot with second participant
           transaction.update(timeSlotRef, {
             participants: [
@@ -319,7 +322,7 @@ function SessionBooking() {
                 userId: user.uid,
                 userName: user.displayName || user.email?.split('@')[0] || 'User',
                 userPhoto: user.photoURL || null,
-                joinedAt: serverTimestamp()
+                joinedAt: currentTime
               }
             ],
             updatedAt: serverTimestamp()
@@ -353,7 +356,6 @@ function SessionBooking() {
     try {
       // Find the next available session with a partner waiting
       const now = new Date();
-      const endOfToday = endOfDay(now);
       
       // Look for time slots with one participant waiting
       const dayString = format(now, 'yyyy-MM-dd');

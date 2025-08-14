@@ -36,7 +36,6 @@ function VideoSession() {
   const [session, setSession] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
-  const [jitsiReady, setJitsiReady] = useState(false);
   const [connectionStatus, setConnectionStatus] = useState('connecting');
   const [retryAttempts, setRetryAttempts] = useState(0);
   const [partnerConnected, setPartnerConnected] = useState(false);
@@ -94,7 +93,6 @@ function VideoSession() {
       if (loading && mountedRef.current && !cleanupRef.current) {
         console.log('Auto-starting session after timeout - showing waiting modal');
         setLoading(false);
-        setJitsiReady(true);
         setConnectionStatus('waiting');
         setShowWaitingModal(true);
         setParticipantCount(1); // Set to 1 when showing waiting modal
@@ -165,7 +163,7 @@ function VideoSession() {
         try {
           apiRef.current.dispose();
         } catch (e) {
-          console.log('Error disposing Jitsi API:', e);
+          console.log('Error disposing during retry:', e);
         }
         apiRef.current = null;
       }
@@ -220,10 +218,8 @@ function VideoSession() {
           setConnectionStatus('connected');
           setShowWaitingModal(false);
           
-          if (!sessionStarted) {
-            setSessionStarted(true);
-            toast.success(`${participant.displayName || 'Study partner'} joined! Let's focus together! 🎉`);
-          }
+          setSessionStarted(true);
+          toast.success(`${participant.displayName || 'Study partner'} joined! Let's focus together! 🎉`);
         }
       });
 
@@ -262,7 +258,6 @@ function VideoSession() {
         // Clear loading and show waiting modal
         setError(null);
         setLoading(false);
-        setJitsiReady(true);
         
         // Always start in waiting mode
         setConnectionStatus('waiting');
@@ -311,7 +306,7 @@ function VideoSession() {
       setError('Failed to setup video connection properly');
       setLoading(false);
     }
-  }, [user?.uid]); // Removed endSession and sessionStarted from dependencies
+  }, [user?.uid, endSession]);
 
   // Initialize Jitsi Meet with robust error handling - stable version
   const initializeJitsi = useCallback((sessionData) => {
@@ -471,16 +466,7 @@ function VideoSession() {
     };
 
     loadJitsiScript();
-  }, [sessionId, user?.uid]); // Removed setupEventListeners from dependencies
-
-  // Start session with partner - only when both are connected
-  const startPartnerSession = useCallback(() => {
-    console.log('Starting partner session');
-    setConnectionStatus('connected');
-    setSessionStarted(true);
-    setShowWaitingModal(false);
-    toast.success('Partner session started! Focus together! 🤝');
-  }, []);
+  }, [sessionId, user?.uid, user?.displayName, user?.email, setupEventListeners]);
 
   // Retry connection with improved logic
   const retryConnection = useCallback(() => {
@@ -493,7 +479,6 @@ function VideoSession() {
     setRetryAttempts(prev => prev + 1);
     setError(null);
     setLoading(true);
-    setJitsiReady(false);
     setConnectionStatus('connecting');
     setShowWaitingModal(false);
     
@@ -552,7 +537,6 @@ function VideoSession() {
       if (mountedRef.current && !cleanupRef.current) {
         console.log('Force stopping loading after 5 seconds');
         setLoading(false);
-        setJitsiReady(true);
         setConnectionStatus('waiting');
         setShowWaitingModal(true);
       }
@@ -628,7 +612,7 @@ function VideoSession() {
         sessionListenerRef.current = null;
       }
     };
-  }, [sessionId, user?.uid]); // Removed navigate and initializeJitsi from dependencies to prevent loops
+  }, [sessionId, user?.uid, navigate, initializeJitsi]);
 
   // Separate cleanup effect for component unmount
   useEffect(() => {
