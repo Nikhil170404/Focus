@@ -4180,3 +4180,400 @@
     grid-template-columns: 1fr;
   }
 }
+
+/* Updated Session Card Styles */
+
+.session-card {
+  background: white;
+  border-radius: 16px;
+  padding: 1.5rem;
+  margin-bottom: 1rem;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.05);
+  border: 2px solid transparent;
+  transition: all 0.3s ease;
+  cursor: pointer;
+  position: relative;
+  overflow: hidden;
+}
+
+.session-card:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 8px 25px rgba(0, 0, 0, 0.1);
+  border-color: #e2e8f0;
+}
+
+.session-card.waiting-partner {
+  border-left: 4px solid #f6ad55;
+  background: linear-gradient(135deg, #fffaf0 0%, #fef5e7 100%);
+}
+
+.session-card.has-partner {
+  border-left: 4px solid #68d391;
+  background: linear-gradient(135deg, #f0fff4 0%, #e6fffa 100%);
+}
+
+.session-card.completed {
+  border-left: 4px solid #9f7aea;
+  background: linear-gradient(135deg, #faf5ff 0%, #e9d8fd 100%);
+  cursor: default;
+}
+
+.session-card.completed:hover {
+  transform: none;
+}
+
+.session-info {
+  margin-bottom: 1rem;
+}
+
+.session-time {
+  font-size: 1.1rem;
+  font-weight: 700;
+  color: #2d3748;
+  margin-bottom: 0.5rem;
+}
+
+.session-duration {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  font-size: 0.9rem;
+  color: #4a5568;
+  font-weight: 600;
+  margin-bottom: 1rem;
+}
+
+.session-duration svg {
+  color: #718096;
+}
+
+/* Partner Information Styles */
+.session-partner {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  padding: 1rem;
+  border-radius: 12px;
+  margin-bottom: 1rem;
+  transition: all 0.2s ease;
+}
+
+.session-partner.waiting {
+  background: rgba(246, 173, 85, 0.1);
+  border: 1px solid rgba(246, 173, 85, 0.2);
+}
+
+.session-partner.confirmed {
+  background: rgba(104, 211, 145, 0.1);
+  border: 1px solid rgba(104, 211, 145, 0.2);
+}
+
+.partner-avatar {
+  width: 40px;
+  height: 40px;
+  border-radius: 50%;
+  overflow: hidden;
+  flex-shrink: 0;
+  position: relative;
+}
+
+.partner-avatar img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.avatar-placeholder {
+  width: 100%;
+  height: 100%;
+  background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+  color: white;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-weight: 700;
+  font-size: 1.1rem;
+}
+
+.session-partner.waiting .avatar-placeholder {
+  background: linear-gradient(135deg, #f6ad55 0%, #ed8936 100%);
+  animation: pulse 2s infinite;
+}
+
+@keyframes pulse {
+  0%, 100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.7;
+  }
+}
+
+.partner-details {
+  flex: 1;
+  min-width: 0;
+}
+
+.partner-name {
+  display: block;
+  font-weight: 600;
+  font-size: 0.95rem;
+  color: #2d3748;
+  margin-bottom: 0.25rem;
+}
+
+.partner-subtitle {
+  display: block;
+  font-size: 0.8rem;
+  color: #718096;
+  font-style: italic;
+}
+
+.partner-status-icon {
+  color: #718096;
+  font-size: 1.1rem;
+  flex-shrink: 0;
+}
+
+.session-partner.waiting .partner-status-icon {
+  color: #ed8936;
+}
+
+.session-partner.confirmed .partner-status-icon {
+  color: #38a169;
+}
+
+.session-goal {
+  background: #f7fafc;
+  padding: 0.75rem;
+  border-radius: 8px;
+  font-size: 0.9rem;
+  line-height: 1.4;
+  color: #4a5568;
+}
+
+.session-goal strong {
+  color: #2d3748;
+}
+
+/* Session Actions */
+.session-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+}
+
+.action-buttons {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  flex: 1;
+}
+
+.btn-primary.btn-small {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.6rem 1.2rem;
+  background: linear-gradient(135deg, #4299e1 0%, #3182ce 100%);
+  color: white;
+  border: none;
+  border-radius: 10px;
+  font-weight: 600;
+  font-size: 0.85rem;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  flex-shrink: 0;
+}
+
+.btn-primary.btn-small:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 4px 12px rgba(66, 153, 225, 0.3);
+}
+
+.waiting-indicator {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  font-size: 0.8rem;
+  color: #ed8936;
+  font-weight: 600;
+}
+
+.pulse-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #ed8936;
+  animation: pulse 1.5s infinite;
+}
+
+.session-status {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.5rem 1rem;
+  border-radius: 10px;
+  font-weight: 600;
+  font-size: 0.85rem;
+}
+
+.session-status.completed {
+  background: #e6fffa;
+  color: #2c7a7b;
+}
+
+.session-status.cancelled {
+  background: #fed7d7;
+  color: #c53030;
+}
+
+.completion-note {
+  font-size: 0.75rem;
+  opacity: 0.8;
+  font-weight: 500;
+  margin-left: 0.5rem;
+}
+
+/* Responsive Design */
+@media (max-width: 768px) {
+  .session-card {
+    padding: 1rem;
+    margin-bottom: 0.75rem;
+  }
+  
+  .session-partner {
+    padding: 0.75rem;
+    gap: 0.75rem;
+  }
+  
+  .partner-avatar {
+    width: 32px;
+    height: 32px;
+  }
+  
+  .avatar-placeholder {
+    font-size: 0.9rem;
+  }
+  
+  .partner-name {
+    font-size: 0.9rem;
+  }
+  
+  .partner-subtitle {
+    font-size: 0.75rem;
+  }
+  
+  .session-actions {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 0.75rem;
+  }
+  
+  .action-buttons {
+    justify-content: space-between;
+  }
+  
+  .btn-primary.btn-small {
+    padding: 0.75rem 1rem;
+    flex: 1;
+    justify-content: center;
+  }
+}
+
+/* Empty State Improvements */
+.empty-state {
+  text-align: center;
+  padding: 3rem 2rem;
+  background: white;
+  border-radius: 16px;
+  border: 2px dashed #e2e8f0;
+}
+
+.empty-state .empty-icon {
+  font-size: 3rem;
+  margin-bottom: 1rem;
+}
+
+.empty-state h3 {
+  font-size: 1.3rem;
+  font-weight: 700;
+  color: #2d3748;
+  margin-bottom: 0.5rem;
+}
+
+.empty-state p {
+  color: #718096;
+  margin-bottom: 2rem;
+  line-height: 1.5;
+}
+
+/* Sessions List */
+.sessions-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+}
+
+/* Partner Status Indicators */
+.partner-status-indicator {
+  position: absolute;
+  top: 12px;
+  right: 12px;
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  border: 2px solid white;
+}
+
+.partner-status-indicator.waiting {
+  background: #f6ad55;
+  animation: pulse 2s infinite;
+}
+
+.partner-status-indicator.confirmed {
+  background: #68d391;
+}
+
+.session-card.waiting-partner::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 3px;
+  background: linear-gradient(90deg, #f6ad55, #ed8936, #f6ad55);
+  background-size: 200% 100%;
+  animation: shimmer 2s linear infinite;
+}
+
+@keyframes shimmer {
+  0% {
+    background-position: -200% 0;
+  }
+  100% {
+    background-position: 200% 0;
+  }
+}
+
+/* Session Card Hover Effects */
+.session-card:not(.completed):hover .partner-avatar {
+  transform: scale(1.05);
+}
+
+.session-card:not(.completed):hover .btn-primary.btn-small {
+  transform: translateY(-1px);
+  box-shadow: 0 6px 16px rgba(66, 153, 225, 0.4);
+}
+
+/* Focus Styles */
+.session-card:focus {
+  outline: none;
+  box-shadow: 0 0 0 3px rgba(66, 153, 225, 0.5);
+}
+
+.btn-primary.btn-small:focus {
+  outline: none;
+  box-shadow: 0 0 0 3px rgba(66, 153, 225, 0.5);
+}

@@ -4,13 +4,16 @@ import { doc, updateDoc, onSnapshot, serverTimestamp } from 'firebase/firestore'
 import { db } from '../../config/firebase';
 import { useAuth } from '../../hooks/useAuth';
 import SessionTimer from './SessionTimer';
-import SessionChat from './SessionChat';
 import { 
   FiPhoneOff,
-  FiMessageCircle,
   FiRefreshCw,
   FiX,
-  FiClock
+  FiClock,
+  FiUsers,
+  FiVideo,
+  FiVideoOff,
+  FiMic,
+  FiMicOff
 } from 'react-icons/fi';
 import toast from 'react-hot-toast';
 
@@ -35,11 +38,43 @@ function VideoSession() {
   const [error, setError] = useState(null);
   const [jitsiReady, setJitsiReady] = useState(false);
   const [connectionStatus, setConnectionStatus] = useState('connecting');
-  const [showChat, setShowChat] = useState(false);
   const [retryAttempts, setRetryAttempts] = useState(0);
   const [partnerConnected, setPartnerConnected] = useState(false);
   const [sessionStarted, setSessionStarted] = useState(false);
   const [showWaitingModal, setShowWaitingModal] = useState(false);
+  const [participantCount, setParticipantCount] = useState(1); // Initialize to 1 (current user)
+  const [mediaEnabled, setMediaEnabled] = useState({ video: true, audio: true });
+  const [networkStatus, setNetworkStatus] = useState('online');
+
+  // Network status monitoring
+  useEffect(() => {
+    const handleOnline = () => {
+      console.log('Network: Online');
+      setNetworkStatus('online');
+      if (error && error.includes('network')) {
+        setError(null);
+      }
+    };
+
+    const handleOffline = () => {
+      console.log('Network: Offline');
+      setNetworkStatus('offline');
+      setError('No internet connection. Please check your network and try again.');
+    };
+
+    window.addEventListener('online', handleOnline);
+    window.addEventListener('offline', handleOffline);
+
+    // Check initial network status
+    if (!navigator.onLine) {
+      handleOffline();
+    }
+
+    return () => {
+      window.removeEventListener('online', handleOnline);
+      window.removeEventListener('offline', handleOffline);
+    };
+  }, [error]);
 
   // Component mount/unmount tracking
   useEffect(() => {
@@ -57,18 +92,19 @@ function VideoSession() {
 
     const loadingTimeout = setTimeout(() => {
       if (loading && mountedRef.current && !cleanupRef.current) {
-        console.log('Auto-starting session after timeout');
+        console.log('Auto-starting session after timeout - showing waiting modal');
         setLoading(false);
         setJitsiReady(true);
         setConnectionStatus('waiting');
         setShowWaitingModal(true);
+        setParticipantCount(1); // Set to 1 when showing waiting modal
       }
     }, 6000);
 
     return () => clearTimeout(loadingTimeout);
   }, [loading]);
 
-  // End session function with improved cleanup
+  // End session function with improved cleanup - stable version
   const endSession = useCallback(async () => {
     if (cleanupRef.current) return;
     cleanupRef.current = true;
@@ -111,7 +147,7 @@ function VideoSession() {
     }
   }, [sessionId, session, navigate]);
 
-  // Cancel session function with improved cleanup
+  // Cancel session function with improved cleanup - stable version
   const cancelSession = useCallback(async () => {
     if (cleanupRef.current) return;
     cleanupRef.current = true;
@@ -153,7 +189,7 @@ function VideoSession() {
     }
   }, [sessionId, navigate]);
 
-  // Setup event listeners for Jitsi API with enhanced partner handling
+  // Setup event listeners for Jitsi API with enhanced partner handling - stable version
   const setupEventListeners = useCallback(() => {
     if (!apiRef.current || !mountedRef.current || cleanupRef.current) return;
 
@@ -168,6 +204,9 @@ function VideoSession() {
       apiRef.current.on('participantJoined', (participant) => {
         if (!mountedRef.current || cleanupRef.current) return;
         console.log('Participant joined:', participant);
+        
+        // Update participant count
+        setParticipantCount(prev => prev + 1);
         
         if (participant.id !== user?.uid) {
           setPartnerConnected(true);
@@ -185,6 +224,9 @@ function VideoSession() {
         if (!mountedRef.current || cleanupRef.current) return;
         console.log('Participant left:', participant);
         
+        // Update participant count
+        setParticipantCount(prev => Math.max(0, prev - 1));
+        
         if (participant.id !== user?.uid) {
           setPartnerConnected(false);
           setConnectionStatus('waiting');
@@ -192,6 +234,7 @@ function VideoSession() {
           
           // Show waiting modal again if no partner
           setShowWaitingModal(true);
+          setSessionStarted(false);
         }
       });
 
@@ -199,27 +242,26 @@ function VideoSession() {
         if (!mountedRef.current || cleanupRef.current) return;
         console.log('Successfully joined video conference');
         
+        // Set participant count to 1 (self) immediately
+        setParticipantCount(1);
+        
         // Clear loading and show waiting modal
         setError(null);
         setLoading(false);
         setJitsiReady(true);
         
-        // Set status based on if we already have a partner
-        if (partnerConnected) {
-          setConnectionStatus('connected');
-          setShowWaitingModal(false);
-        } else {
-          setConnectionStatus('waiting');
-          setShowWaitingModal(true);
-        }
+        // Always start in waiting mode
+        setConnectionStatus('waiting');
+        setShowWaitingModal(true);
         
-        toast.success('Connected to video room!');
+        toast.success('Connected to video room! Waiting for study partner...');
       });
 
       apiRef.current.on('videoConferenceLeft', () => {
         if (!mountedRef.current || cleanupRef.current) return;
         console.log('Left video conference');
         setConnectionStatus('disconnected');
+        setParticipantCount(0);
       });
 
       apiRef.current.on('readyToClose', () => {
@@ -232,36 +274,36 @@ function VideoSession() {
       apiRef.current.on('conferenceError', (error) => {
         if (!mountedRef.current || cleanupRef.current) return;
         console.error('Conference error:', error);
-        setError('Video connection failed. You can still continue with a solo session.');
+        setError('Video connection failed. Please refresh to try again.');
         setLoading(false);
-        setConnectionStatus('waiting');
-        setShowWaitingModal(true);
+        setConnectionStatus('error');
       });
 
-      // Additional event listeners for better UX
+      // Media control events
       apiRef.current.on('audioMuteStatusChanged', (data) => {
         if (!mountedRef.current || cleanupRef.current) return;
         console.log('Audio mute status changed:', data);
+        setMediaEnabled(prev => ({ ...prev, audio: !data.muted }));
       });
 
       apiRef.current.on('videoMuteStatusChanged', (data) => {
         if (!mountedRef.current || cleanupRef.current) return;
         console.log('Video mute status changed:', data);
+        setMediaEnabled(prev => ({ ...prev, video: !data.muted }));
       });
 
     } catch (error) {
       console.error('Error setting up event listeners:', error);
       setError('Failed to setup video connection properly');
       setLoading(false);
-      setShowWaitingModal(true);
     }
-  }, [endSession, user?.uid, sessionStarted, partnerConnected]);
+  }, [user?.uid]); // Removed endSession and sessionStarted from dependencies
 
-  // Initialize Jitsi Meet with robust error handling
+  // Initialize Jitsi Meet with robust error handling - stable version
   const initializeJitsi = useCallback((sessionData) => {
     // Prevent multiple simultaneous initializations
-    if (initializationRef.current || !mountedRef.current || cleanupRef.current) {
-      console.log('Jitsi initialization skipped - already in progress or component unmounted');
+    if (initializationRef.current || !mountedRef.current || cleanupRef.current || apiRef.current) {
+      console.log('Jitsi initialization skipped - already in progress, component unmounted, or API exists');
       return;
     }
 
@@ -315,14 +357,9 @@ function VideoSession() {
         SHOW_WATERMARK_FOR_GUESTS: false,
         DEFAULT_BACKGROUND: '#1a1a2e',
         TOOLBAR_BUTTONS: [
-          'microphone', 'camera', 'closedcaptions', 'desktop',
-          'fullscreen', 'fodeviceselection', 'hangup', 'profile',
-          'recording', 'livestreaming', 'etherpad', 'sharedvideo',
-          'settings', 'raisehand', 'videoquality', 'filmstrip',
-          'invite', 'feedback', 'stats', 'shortcuts', 'tileview',
-          'videobackgroundblur', 'download', 'help', 'mute-everyone'
+          'microphone', 'camera', 'hangup', 'settings', 'fullscreen'
         ],
-        SETTINGS_SECTIONS: ['devices', 'language', 'moderator', 'profile', 'calendar'],
+        SETTINGS_SECTIONS: ['devices', 'language'],
         RECENT_LIST_ENABLED: false,
         DISPLAY_WELCOME_PAGE_CONTENT: false,
         SHOW_CHROME_EXTENSION_BANNER: false
@@ -330,21 +367,12 @@ function VideoSession() {
     };
 
     const initializeAPI = () => {
-      if (!mountedRef.current || cleanupRef.current) {
+      if (!mountedRef.current || cleanupRef.current || apiRef.current) {
         initializationRef.current = false;
         return;
       }
 
       try {
-        // Dispose existing API if any
-        if (apiRef.current) {
-          try {
-            apiRef.current.dispose();
-          } catch (e) {
-            console.log('Error disposing existing API:', e);
-          }
-        }
-        
         console.log('Creating new Jitsi API instance');
         apiRef.current = new window.JitsiMeetExternalAPI(domain, options);
         setupEventListeners();
@@ -354,11 +382,9 @@ function VideoSession() {
         console.error('Error creating Jitsi API:', error);
         initializationRef.current = false;
         if (mountedRef.current && !cleanupRef.current) {
-          console.log('Jitsi failed, showing waiting modal');
+          setError('Failed to initialize video connection. Please refresh and try again.');
           setLoading(false);
-          setJitsiReady(true);
-          setConnectionStatus('waiting');
-          setShowWaitingModal(true);
+          setConnectionStatus('error');
         }
       }
     };
@@ -371,12 +397,26 @@ function VideoSession() {
 
       if (window.JitsiMeetExternalAPI) {
         console.log('Jitsi API already available');
-        initTimeoutRef.current = setTimeout(initializeAPI, 100);
+        initTimeoutRef.current = setTimeout(initializeAPI, 500);
         return;
       }
 
       if (scriptLoadedRef.current) {
-        console.log('Jitsi script already loading');
+        console.log('Jitsi script already loading, waiting...');
+        // Wait for existing script to load
+        const checkInterval = setInterval(() => {
+          if (window.JitsiMeetExternalAPI) {
+            clearInterval(checkInterval);
+            if (!mountedRef.current || cleanupRef.current || apiRef.current) {
+              initializationRef.current = false;
+              return;
+            }
+            initTimeoutRef.current = setTimeout(initializeAPI, 500);
+          }
+        }, 100);
+        
+        // Cleanup interval after 10 seconds
+        setTimeout(() => clearInterval(checkInterval), 10000);
         return;
       }
 
@@ -389,12 +429,12 @@ function VideoSession() {
       
       script.onload = () => {
         console.log('Jitsi script loaded successfully');
-        if (!mountedRef.current || cleanupRef.current) {
+        if (!mountedRef.current || cleanupRef.current || apiRef.current) {
           initializationRef.current = false;
           return;
         }
         
-        initTimeoutRef.current = setTimeout(initializeAPI, 100);
+        initTimeoutRef.current = setTimeout(initializeAPI, 500);
       };
       
       script.onerror = (error) => {
@@ -402,11 +442,9 @@ function VideoSession() {
         initializationRef.current = false;
         scriptLoadedRef.current = false;
         if (mountedRef.current && !cleanupRef.current) {
-          console.log('Script load failed, showing waiting modal');
+          setError('Failed to load video system. Please check your internet connection and refresh.');
           setLoading(false);
-          setJitsiReady(true);
-          setConnectionStatus('waiting');
-          setShowWaitingModal(true);
+          setConnectionStatus('error');
         }
       };
       
@@ -414,19 +452,9 @@ function VideoSession() {
     };
 
     loadJitsiScript();
-  }, [sessionId, user, setupEventListeners]);
+  }, [sessionId, user?.uid]); // Removed setupEventListeners from dependencies
 
-  // Start solo session with proper state management
-  const startSoloSession = useCallback(() => {
-    console.log('Starting solo session');
-    setConnectionStatus('solo');
-    setPartnerConnected(false);
-    setSessionStarted(true);
-    setShowWaitingModal(false);
-    toast.success('Solo session started! Stay focused! 🎯');
-  }, []);
-
-  // Start session with partner
+  // Start session with partner - only when both are connected
   const startPartnerSession = useCallback(() => {
     console.log('Starting partner session');
     setConnectionStatus('connected');
@@ -478,7 +506,7 @@ function VideoSession() {
     }, 2000);
   }, [retryAttempts, session, initializeJitsi]);
 
-  // Session listener effect - fixed and stable
+  // Session listener effect - fixed to prevent infinite loops
   useEffect(() => {
     // Early return if missing required data
     if (!sessionId || !user?.uid) {
@@ -533,14 +561,19 @@ function VideoSession() {
             
             setSession(sessionData);
             
-            // Initialize Jitsi when we have session data and container is ready
-            if (jitsiContainerRef.current && !initializationRef.current) {
+            // Check if we have a partner
+            const hasPartner = sessionData.partnerId && sessionData.partnerName;
+            console.log('Session has partner:', hasPartner, sessionData.partnerId, sessionData.partnerName);
+            
+            // Initialize Jitsi only once when we have session data and container is ready
+            if (jitsiContainerRef.current && !initializationRef.current && !apiRef.current) {
               console.log('Initializing Jitsi for session');
+              // Use a timeout to prevent rapid re-initialization
               setTimeout(() => {
-                if (mountedRef.current && !cleanupRef.current && !initializationRef.current) {
+                if (mountedRef.current && !cleanupRef.current && !initializationRef.current && !apiRef.current) {
                   initializeJitsi(sessionData);
                 }
-              }, 500);
+              }, 1000);
             }
           } else {
             console.error('Session document does not exist');
@@ -574,7 +607,7 @@ function VideoSession() {
         sessionListenerRef.current = null;
       }
     };
-  }, [sessionId, user?.uid]); // Minimal dependencies to prevent loops
+  }, [sessionId, user?.uid]); // Removed navigate and initializeJitsi from dependencies to prevent loops
 
   // Separate cleanup effect for component unmount
   useEffect(() => {
@@ -621,32 +654,73 @@ function VideoSession() {
         return '⏳ Waiting for partner';
       case 'connected':
         return '🟢 Connected with partner';
-      case 'solo':
-        return '🎯 Solo session active';
       case 'disconnected':
         return '🔴 Disconnected';
+      case 'error':
+        return '❌ Connection error';
       default:
         return '🟡 Connecting...';
     }
   };
 
-  // Error state
+  // Media control functions
+  const toggleAudio = () => {
+    if (apiRef.current) {
+      apiRef.current.executeCommand('toggleAudio');
+    }
+  };
+
+  const toggleVideo = () => {
+    if (apiRef.current) {
+      apiRef.current.executeCommand('toggleVideo');
+    }
+  };
+
+  // Error state with network-specific handling
   if (error) {
+    const isNetworkError = error.includes('network') || error.includes('internet') || networkStatus === 'offline';
+    
     return (
       <div className="video-session-error">
         <div className="error-container">
-          <h2>Connection Error</h2>
+          <div className="error-icon">
+            {isNetworkError ? '🌐' : '❌'}
+          </div>
+          <h2>{isNetworkError ? 'Network Error' : 'Connection Error'}</h2>
           <p>{error}</p>
+          
+          {isNetworkError && (
+            <div className="network-status">
+              <p className={`status ${networkStatus}`}>
+                Status: {networkStatus === 'online' ? '🟢 Online' : '🔴 Offline'}
+              </p>
+            </div>
+          )}
+          
           <div className="error-actions">
-            <button className="btn-primary" onClick={retryConnection}>
-              <FiRefreshCw /> Retry Connection
-            </button>
+            {networkStatus === 'online' && (
+              <button className="btn-primary" onClick={retryConnection}>
+                <FiRefreshCw /> Retry Connection
+              </button>
+            )}
             <button className="btn-secondary" onClick={() => navigate('/dashboard')}>
               Back to Dashboard
             </button>
           </div>
+          
           {retryAttempts > 0 && (
             <p className="retry-info">Retry attempt: {retryAttempts}/3</p>
+          )}
+          
+          {isNetworkError && (
+            <div className="network-tips">
+              <h4>Network Troubleshooting:</h4>
+              <ul>
+                <li>Check your WiFi or mobile data connection</li>
+                <li>Try refreshing the page</li>
+                <li>Contact your internet service provider if issues persist</li>
+              </ul>
+            </div>
           )}
         </div>
       </div>
@@ -679,6 +753,9 @@ function VideoSession() {
             <span className={`status-indicator ${connectionStatus}`}>
               {getConnectionStatusText()}
             </span>
+            <span className="participant-count">
+              <FiUsers /> {Math.max(1, participantCount)} participant{Math.max(1, participantCount) !== 1 ? 's' : ''}
+            </span>
             {session?.partnerId && partnerConnected && (
               <span className="partner-info">
                 👥 with {session.partnerName || 'Study Partner'}
@@ -688,12 +765,21 @@ function VideoSession() {
         </div>
         
         <div className="header-controls">
+          {/* Media controls */}
           <button 
-            onClick={() => setShowChat(!showChat)} 
-            className={`control-btn ${showChat ? 'active' : ''}`}
-            title="Toggle chat"
+            onClick={toggleAudio} 
+            className={`control-btn ${mediaEnabled.audio ? 'active' : 'muted'}`}
+            title={mediaEnabled.audio ? 'Mute microphone' : 'Unmute microphone'}
           >
-            <FiMessageCircle />
+            {mediaEnabled.audio ? <FiMic /> : <FiMicOff />}
+          </button>
+          
+          <button 
+            onClick={toggleVideo} 
+            className={`control-btn ${mediaEnabled.video ? 'active' : 'muted'}`}
+            title={mediaEnabled.video ? 'Turn off camera' : 'Turn on camera'}
+          >
+            {mediaEnabled.video ? <FiVideo /> : <FiVideoOff />}
           </button>
           
           <button 
@@ -724,28 +810,27 @@ function VideoSession() {
                 </div>
               )}
               
-              {/* Solo session placeholder */}
-              {connectionStatus === 'solo' && !apiRef.current && (
+              {/* Waiting for partner placeholder */}
+              {connectionStatus === 'waiting' && !loading && (
                 <div className="video-placeholder">
                   <div className="connection-status">
-                    <div className="solo-avatar">
-                      {user?.photoURL ? (
-                        <img src={user.photoURL} alt={user.displayName} />
-                      ) : (
-                        <div className="avatar-placeholder">
-                          {user?.displayName?.charAt(0) || user?.email?.charAt(0) || 'S'}
-                        </div>
-                      )}
+                    <div className="waiting-icon">
+                      <FiUsers size={48} />
                     </div>
-                    <p>Solo Focus Session</p>
-                    <small>Stay focused on your goal!</small>
+                    <p>Study Room Active</p>
+                    <small>Waiting for your study partner to join...</small>
+                    <div className="waiting-dots">
+                      <span></span>
+                      <span></span>
+                      <span></span>
+                    </div>
                   </div>
                 </div>
               )}
             </div>
             
-            {/* Timer Overlay */}
-            {(sessionStarted || connectionStatus === 'solo') && (
+            {/* Timer Overlay - only show when session is started with partner */}
+            {sessionStarted && partnerConnected && (
               <div className="timer-overlay">
                 <SessionTimer 
                   duration={session?.duration || 50} 
@@ -757,19 +842,6 @@ function VideoSession() {
               </div>
             )}
           </div>
-          
-          {/* Chat Sidebar */}
-          {showChat && (
-            <div className="chat-sidebar">
-              <SessionChat
-                sessionId={sessionId}
-                userId={user.uid}
-                userName={user.displayName || user.email?.split('@')[0] || 'User'}
-                partnerId={session?.partnerId}
-                partnerName={session?.partnerName}
-              />
-            </div>
-          )}
         </div>
 
         {/* Session Details */}
@@ -780,24 +852,23 @@ function VideoSession() {
           </div>
           <div className="detail-item">
             <span>Status</span>
-            <p className={connectionStatus === 'connected' || connectionStatus === 'solo' ? 'status-active' : ''}>
+            <p className={connectionStatus === 'connected' ? 'status-active' : ''}>
               {getConnectionStatusText()}
             </p>
           </div>
-          {session?.partnerId ? (
-            <div className="detail-item">
-              <span>Study Partner</span>
-              <p className={partnerConnected ? "status-active" : ""}>
-                {session.partnerName || 'Study Partner'}
-                {partnerConnected ? ' (Connected)' : ' (Waiting...)'}
-              </p>
-            </div>
-          ) : (
-            <div className="detail-item">
-              <span>Mode</span>
-              <p>{connectionStatus === 'solo' ? 'Solo Session' : 'Looking for partner...'}</p>
-            </div>
-          )}
+          <div className="detail-item">
+            <span>Study Partner</span>
+            <p className={partnerConnected ? "status-active" : ""}>
+              {session?.partnerId ? (
+                <>
+                  {session.partnerName || 'Study Partner'}
+                  {partnerConnected ? ' (Connected)' : ' (Invited)'}
+                </>
+              ) : (
+                'Waiting for partner to join...'
+              )}
+            </p>
+          </div>
         </div>
       </div>
 
@@ -807,27 +878,41 @@ function VideoSession() {
           <div className="waiting-modal">
             <div className="waiting-content">
               <div className="waiting-icon">👥</div>
-              <h3>Ready to Focus! 🎯</h3>
-              <p>Your session room is ready!</p>
-              <p>You can start solo or wait for a partner to join</p>
+              <h3>Study Room Ready! 🎯</h3>
+              <p>Your focus session room is active and ready</p>
+              
+              <div className="partner-status">
+                <div className="status-row">
+                  <span className="status-label">Room Status:</span>
+                  <span className="status-value active">✅ Active & Ready</span>
+                </div>
+                <div className="status-row">
+                  <span className="status-label">Study Partner:</span>
+                  <span className="status-value waiting">
+                    {session?.partnerId && session?.partnerName ? (
+                      `⏳ ${session.partnerName} invited`
+                    ) : (
+                      '⏳ Waiting for partner to join'
+                    )}
+                  </span>
+                </div>
+                <div className="status-row">
+                  <span className="status-label">Participants:</span>
+                  <span className="status-value">{Math.max(1, participantCount)}/2 connected</span>
+                </div>
+              </div>
               
               <div className="waiting-tips">
                 <p>💡 <strong>While you wait:</strong></p>
                 <ul>
-                  <li>• Your room is active and others can join</li>
-                  <li>• Partners can join anytime during your session</li>
-                  <li>• You can start focusing immediately</li>
-                  <li>• Timer will start when you begin</li>
+                  <li>• Your camera and microphone are ready</li>
+                  <li>• Partners can join anytime during the session</li>
+                  <li>• Session will start automatically when partner joins</li>
+                  <li>• You can prepare your materials while waiting</li>
                 </ul>
               </div>
               
               <div className="waiting-actions">
-                <button 
-                  className="btn-primary"
-                  onClick={startSoloSession}
-                >
-                  Start Solo Session
-                </button>
                 <button 
                   className="btn-secondary"
                   onClick={cancelSession}
@@ -838,6 +923,14 @@ function VideoSession() {
               
               <div className="waiting-footer">
                 <small>Session ID: {sessionId}</small>
+                <div className="pulse-indicator">
+                  <span></span>
+                  {session?.partnerId && session?.partnerName ? (
+                    `Waiting for ${session.partnerName}...`
+                  ) : (
+                    'Waiting for partner...'
+                  )}
+                </div>
               </div>
             </div>
           </div>

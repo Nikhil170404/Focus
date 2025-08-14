@@ -1,12 +1,13 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
-import { FiPlay, FiPause, FiVolume2, FiVolumeX, FiRotateCcw, FiSkipForward } from 'react-icons/fi';
+import { FiPlay, FiPause, FiVolume2, FiVolumeX, FiRotateCcw } from 'react-icons/fi';
 
 function SessionTimer({ 
   duration = 50, 
   onComplete, 
   autoStart = false,
   onTimeUpdate,
-  showBreakReminder = true 
+  showBreakReminder = true,
+  isOverlay = false 
 }) {
   const [timeLeft, setTimeLeft] = useState(duration * 60);
   const [isRunning, setIsRunning] = useState(autoStart);
@@ -19,6 +20,7 @@ function SessionTimer({
   const intervalRef = useRef(null);
   const audioContextRef = useRef(null);
   const lastNotificationRef = useRef(0);
+  const mountedRef = useRef(true);
   
   const totalSeconds = duration * 60;
   const breakSeconds = 5 * 60;
@@ -40,13 +42,21 @@ function SessionTimer({
     return motivationalMessages[Math.floor(Math.random() * motivationalMessages.length)];
   }, []);
 
+  // Component mount/unmount tracking
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
+
   useEffect(() => {
     // Set initial motivational message
     setMotivationalMessage(getRandomMessage());
     
     // Update message every 5 minutes
     const messageInterval = setInterval(() => {
-      if (isRunning && sessionPhase === 'focus') {
+      if (isRunning && sessionPhase === 'focus' && mountedRef.current) {
         setMotivationalMessage(getRandomMessage());
       }
     }, 300000); // 5 minutes
@@ -55,19 +65,21 @@ function SessionTimer({
   }, [isRunning, sessionPhase, getRandomMessage]);
 
   useEffect(() => {
-    if (isRunning) {
+    if (isRunning && mountedRef.current) {
       intervalRef.current = setInterval(() => {
+        if (!mountedRef.current) return;
+        
         if (sessionPhase === 'focus') {
           setTimeLeft(prevTime => {
             const newTime = prevTime - 1;
             
             // Update parent component
-            if (onTimeUpdate) {
+            if (onTimeUpdate && mountedRef.current) {
               onTimeUpdate(newTime, totalSeconds);
             }
             
             // Play notification sounds at specific intervals
-            if (soundEnabled) {
+            if (soundEnabled && mountedRef.current) {
               playNotificationSounds(newTime);
             }
             
@@ -105,6 +117,8 @@ function SessionTimer({
   }, [isRunning, sessionPhase, soundEnabled, onTimeUpdate, totalSeconds]);
 
   const playNotificationSounds = (newTime) => {
+    if (!mountedRef.current) return;
+    
     const now = Date.now();
     
     // Throttle notifications to prevent spam
@@ -126,6 +140,8 @@ function SessionTimer({
   };
 
   const playSound = async (type, message) => {
+    if (!mountedRef.current) return;
+    
     try {
       // Create AudioContext if not exists
       if (!audioContextRef.current) {
@@ -146,6 +162,8 @@ function SessionTimer({
       
       freqs.forEach((freq, index) => {
         setTimeout(() => {
+          if (!mountedRef.current) return;
+          
           const oscillator = audioContext.createOscillator();
           const gainNode = audioContext.createGain();
           
@@ -164,7 +182,7 @@ function SessionTimer({
       });
       
       // Show notification if supported
-      if ('Notification' in window && Notification.permission === 'granted') {
+      if ('Notification' in window && Notification.permission === 'granted' && mountedRef.current) {
         new Notification('FocusMate Timer', {
           body: message,
           icon: '/favicon.ico',
@@ -178,6 +196,8 @@ function SessionTimer({
   };
 
   const handleFocusComplete = () => {
+    if (!mountedRef.current) return;
+    
     setIsRunning(false);
     setSessionPhase('break');
     
@@ -189,11 +209,13 @@ function SessionTimer({
       setIsBreakTime(true);
       setMotivationalMessage('🎉 Great focus session! Take a 5-minute break to recharge!');
     } else {
-      if (onComplete) onComplete();
+      if (onComplete && mountedRef.current) onComplete();
     }
   };
 
   const handleBreakComplete = () => {
+    if (!mountedRef.current) return;
+    
     setIsBreakTime(false);
     setSessionPhase('completed');
     setMotivationalMessage('🏆 Session completed! Excellent work!');
@@ -202,10 +224,12 @@ function SessionTimer({
       playSound('complete', 'Break time over! Great job today! 🌟');
     }
     
-    if (onComplete) onComplete();
+    if (onComplete && mountedRef.current) onComplete();
   };
 
   const startBreak = () => {
+    if (!mountedRef.current) return;
+    
     setIsRunning(true);
     setIsBreakTime(true);
     setSessionPhase('break');
@@ -214,12 +238,16 @@ function SessionTimer({
   };
 
   const skipBreak = () => {
+    if (!mountedRef.current) return;
+    
     setIsBreakTime(false);
     setSessionPhase('completed');
     if (onComplete) onComplete();
   };
 
   const restartSession = () => {
+    if (!mountedRef.current) return;
+    
     setTimeLeft(totalSeconds);
     setBreakTimeLeft(breakSeconds);
     setIsRunning(false);
@@ -229,6 +257,8 @@ function SessionTimer({
   };
 
   const toggleTimer = () => {
+    if (!mountedRef.current) return;
+    
     if (sessionPhase === 'completed') {
       restartSession();
       return;
@@ -241,6 +271,8 @@ function SessionTimer({
   };
 
   const extendSession = (minutes) => {
+    if (!mountedRef.current) return;
+    
     setTimeLeft(prevTime => prevTime + (minutes * 60));
   };
 
@@ -283,7 +315,7 @@ function SessionTimer({
   // Break time modal
   if (isBreakTime && sessionPhase === 'break' && !isRunning) {
     return (
-      <div className="timer-widget break-modal">
+      <div className={`timer-widget break-modal ${isOverlay ? 'overlay' : ''}`}>
         <div className="break-celebration">
           <div className="celebration-icon">🎉</div>
           <h3>Focus Session Complete!</h3>
@@ -313,7 +345,7 @@ function SessionTimer({
   }
 
   return (
-    <div className="timer-widget">
+    <div className={`timer-widget ${isOverlay ? 'overlay' : ''}`}>
       <div className="timer-circle">
         <svg className="timer-svg" viewBox="0 0 200 200">
           <circle

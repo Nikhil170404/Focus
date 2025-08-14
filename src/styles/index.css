@@ -114,6 +114,7 @@ body {
 /* User Section */
 .user-section {
   display: flex;
+  flex-direction: row-reverse;
   align-items: center;
   gap: 8px;
 }

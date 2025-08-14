@@ -135,11 +135,11 @@ function SessionBooking() {
         for (let time = new Date(sessionStart); time < sessionEnd; time = addHours(time, 0.5)) {
           const timeKey = time.toISOString();
           
-          // Mark as booked if this session has both user and partner
-          if (sessionData.partnerId) {
+          // If session already has both user and partner, mark as fully booked
+          if (sessionData.partnerId && sessionData.userId) {
             booked.add(timeKey);
           } else if (sessionData.userId !== user.uid) {
-            // Available for partnering
+            // Available for partnering - someone is waiting
             if (!partners[sessionData.startTime]) {
               partners[sessionData.startTime] = [];
             }
@@ -228,7 +228,7 @@ function SessionBooking() {
   const getTimeSlotClass = (slot) => {
     let className = 'time-slot';
     
-    // Check if this slot is booked (has both user and partner)
+    // Check if this slot is fully booked (has both user and partner)
     if (bookedSlots.has(slot.value)) {
       className += ' booked';
       return className;
@@ -269,7 +269,7 @@ function SessionBooking() {
     setLoading(true);
     
     try {
-      // Find the next available session with a partner
+      // Find the next available session with a partner waiting
       const now = new Date();
       const endOfToday = endOfDay(now);
       
@@ -303,40 +303,22 @@ function SessionBooking() {
             return;
           }
           
-          // Create our session and pair immediately
-          const newSessionData = {
-            userId: user.uid,
-            userName: user.displayName || user.email?.split('@')[0] || 'User',
-            userPhoto: user.photoURL,
-            startTime: sessionData.startTime,
-            endTime: sessionData.endTime,
-            duration: duration,
-            goal: goal.trim(),
-            status: 'scheduled',
-            createdAt: serverTimestamp(),
-            partnerId: sessionData.userId,
-            partnerName: sessionData.userName,
-            partnerPhoto: sessionData.userPhoto,
-            quickMatch: true
-          };
-
-          const docRef = await addDoc(collection(db, 'sessions'), newSessionData);
-          
-          // Update the partner's session
+          // Update the existing session to add us as partner
           await updateDoc(doc(db, 'sessions', sessionId), {
             partnerId: user.uid,
             partnerName: user.displayName || user.email?.split('@')[0] || 'User',
-            partnerPhoto: user.photoURL || null
+            partnerPhoto: user.photoURL || null,
+            updatedAt: serverTimestamp()
           });
           
           const partnerName = sessionData.userName || 'Study Partner';
           toast.success(`Quick match found! Paired with ${partnerName} 🎉`);
-          navigate(`/session/${docRef.id}`);
+          navigate(`/session/${sessionId}`);
           return;
         }
       }
       
-      // No quick match found, create a session for others to join
+      // No quick match found, create a session and wait for partner
       const nextSlot = availableSlots.find(slot => {
         const slotTime = new Date(slot.value);
         return slotTime > addHours(now, 0.5) && !bookedSlots.has(slot.value); // At least 30 minutes from now and not booked
@@ -359,10 +341,10 @@ function SessionBooking() {
           quickMatch: true
         };
 
-        await addDoc(collection(db, 'sessions'), sessionData);
+        const docRef = await addDoc(collection(db, 'sessions'), sessionData);
         
         toast.success('Session created! Waiting for a study partner to join 📚');
-        navigate('/dashboard');
+        navigate(`/session/${docRef.id}`);
       } else {
         toast.error('No available slots for quick match today');
       }
@@ -385,7 +367,7 @@ function SessionBooking() {
       return;
     }
 
-    // Check if slot is booked
+    // Check if slot is fully booked
     if (isSlotBooked(selectedTime)) {
       toast.error('This time slot is already fully booked. Please select another time.');
       return;
@@ -394,30 +376,40 @@ function SessionBooking() {
     setLoading(true);
     
     try {
-      const sessionData = {
-        userId: user.uid,
-        userName: user.displayName || user.email?.split('@')[0] || 'User',
-        userPhoto: user.photoURL || null,
-        startTime: selectedTime,
-        endTime: addHours(new Date(selectedTime), duration / 60).toISOString(),
-        duration: duration,
-        goal: goal.trim(),
-        status: 'scheduled',
-        createdAt: serverTimestamp(),
-        partnerId: null,
-        partnerName: null,
-        partnerPhoto: null
-      };
-
-      const docRef = await addDoc(collection(db, 'sessions'), sessionData);
-      
-      // Try to find a partner immediately
-      const partnerResult = await findPartner(docRef.id, sessionData);
+      // Check if there's already a partner waiting at this exact time
+      const partnerResult = await findExistingPartner(selectedTime);
       
       if (partnerResult.found) {
+        // Join existing session as partner
+        await updateDoc(doc(db, 'sessions', partnerResult.sessionId), {
+          partnerId: user.uid,
+          partnerName: user.displayName || user.email?.split('@')[0] || 'User',
+          partnerPhoto: user.photoURL || null,
+          updatedAt: serverTimestamp()
+        });
+        
         const partnerName = partnerResult.partnerName || 'Study Partner';
         toast.success(`Session booked with ${partnerName}! 🎯`);
+        navigate(`/session/${partnerResult.sessionId}`);
       } else {
+        // Create new session and wait for partner
+        const sessionData = {
+          userId: user.uid,
+          userName: user.displayName || user.email?.split('@')[0] || 'User',
+          userPhoto: user.photoURL || null,
+          startTime: selectedTime,
+          endTime: addHours(new Date(selectedTime), duration / 60).toISOString(),
+          duration: duration,
+          goal: goal.trim(),
+          status: 'scheduled',
+          createdAt: serverTimestamp(),
+          partnerId: null,
+          partnerName: null,
+          partnerPhoto: null
+        };
+
+        const docRef = await addDoc(collection(db, 'sessions'), sessionData);
+        
         toast.success('Session booked! Looking for a study partner... 📚');
         
         // Set up real-time listener for partner matching
@@ -435,9 +427,9 @@ function SessionBooking() {
         setTimeout(() => {
           unsubscribe();
         }, 300000);
+        
+        navigate(`/session/${docRef.id}`);
       }
-      
-      navigate('/dashboard');
     } catch (error) {
       console.error('Error booking session:', error);
       toast.error('Failed to book session. Please try again.');
@@ -446,13 +438,13 @@ function SessionBooking() {
     setLoading(false);
   };
 
-  const findPartner = async (sessionId, sessionData) => {
+  const findExistingPartner = async (startTime) => {
     try {
-      // Look for available partner sessions with exact time and duration match
+      // Look for exact match: same time, duration, and needs partner
       const q = query(
         collection(db, 'sessions'),
-        where('startTime', '==', sessionData.startTime),
-        where('duration', '==', sessionData.duration),
+        where('startTime', '==', startTime),
+        where('duration', '==', duration),
         where('status', '==', 'scheduled'),
         where('partnerId', '==', null),
         limit(5)
@@ -473,29 +465,16 @@ function SessionBooking() {
           return { found: false };
         }
         
-        // Update both sessions
-        await Promise.all([
-          updateDoc(doc(db, 'sessions', sessionId), {
-            partnerId: partnerData.userId,
-            partnerName: partnerData.userName || 'Study Partner',
-            partnerPhoto: partnerData.userPhoto || null
-          }),
-          updateDoc(doc(db, 'sessions', partnerSession.id), {
-            partnerId: user.uid,
-            partnerName: user.displayName || user.email?.split('@')[0] || 'User',
-            partnerPhoto: user.photoURL || null
-          })
-        ]);
-        
         return {
           found: true,
+          sessionId: partnerSession.id,
           partnerName: partnerData.userName || 'Study Partner'
         };
       }
 
       return { found: false };
     } catch (error) {
-      console.error('Error finding partner:', error);
+      console.error('Error finding existing partner:', error);
       return { found: false };
     }
   };
@@ -534,21 +513,21 @@ function SessionBooking() {
               <FiZap />
             </div>
             <div className="quick-match-content">
-              <h3>Quick Match</h3>
-              <p>Find an available study partner right now</p>
+              <h3>Quick Partner Match</h3>
+              <p>Join an available study partner right now or create a session for others to join</p>
             </div>
             <button 
               className="btn-quick-match"
               onClick={handleQuickMatch}
               disabled={loading || !goal.trim()}
             >
-              <FiUsers /> Quick Match
+              <FiUsers /> Find Partner
             </button>
           </div>
         </div>
 
         <div className="divider">
-          <span>OR SCHEDULE A SESSION</span>
+          <span>OR SCHEDULE A SPECIFIC TIME</span>
         </div>
         
         <div className="booking-form">
@@ -584,24 +563,28 @@ function SessionBooking() {
               <div className="time-grid">
                 {availableSlots.map(slot => {
                   const partnersCount = partnersAvailable[slot.value]?.length || 0;
-                  const isBooked = isSlotBooked(slot.value);
+                  const isFullyBooked = isSlotBooked(slot.value);
                   
                   return (
                     <button
                       key={slot.value}
                       className={getTimeSlotClass(slot)}
                       onClick={() => handleTimeSlotClick(slot.value)}
-                      disabled={isBooked}
-                      title={isBooked ? 'This time slot is fully booked' : ''}
+                      disabled={isFullyBooked}
+                      title={isFullyBooked ? 'This time slot is fully booked' : ''}
                     >
                       <span className="time-text">{slot.time}</span>
-                      {isBooked ? (
+                      {isFullyBooked ? (
                         <span className="booked-indicator">
-                          🚫 Booked
+                          🚫 Full
                         </span>
-                      ) : partnersCount > 0 && (
+                      ) : partnersCount > 0 ? (
                         <span className="partners-indicator">
-                          👥 {partnersCount}
+                          👥 {partnersCount} waiting
+                        </span>
+                      ) : (
+                        <span className="available-indicator">
+                          ✨ Available
                         </span>
                       )}
                     </button>
@@ -717,9 +700,12 @@ function SessionBooking() {
                 <div className="summary-item">
                   <FiUsers className="summary-icon" />
                   <div className="summary-content">
-                    <span className="summary-label">Partners Available</span>
+                    <span className="summary-label">Partner Status</span>
                     <span className="summary-value">
-                      {partnersAvailable[selectedTime]?.length || 0} waiting
+                      {partnersAvailable[selectedTime]?.length > 0 
+                        ? `${partnersAvailable[selectedTime].length} partner(s) waiting`
+                        : 'Will wait for partner'
+                      }
                     </span>
                   </div>
                 </div>
@@ -734,8 +720,9 @@ function SessionBooking() {
             disabled={loading || !selectedTime || !goal.trim() || isSlotBooked(selectedTime)}
           >
             {loading ? 'Booking...' : 
-             isSlotBooked(selectedTime) ? 'Time Slot Booked' : 
-             'Book Session'}
+             isSlotBooked(selectedTime) ? 'Time Slot Full' : 
+             partnersAvailable[selectedTime]?.length > 0 ? 'Join Study Partner' :
+             'Create Session & Wait for Partner'}
           </button>
         </div>
       </div>
