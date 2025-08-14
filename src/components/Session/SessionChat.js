@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { collection, addDoc, query, orderBy, onSnapshot, serverTimestamp, limit } from 'firebase/firestore';
 import { db } from '../../config/firebase';
-import { FiSend, FiSmile, FiMoreVertical, FiHeart, FiThumbsUp, FiCoffee } from 'react-icons/fi';
+import { FiSend, FiSmile, FiHeart, FiThumbsUp, FiCoffee } from 'react-icons/fi';
 import { format } from 'date-fns';
 
 function SessionChat({ sessionId, userId, userName, partnerId, partnerName }) {
@@ -45,22 +45,7 @@ function SessionChat({ sessionId, userId, userName, partnerId, partnerName }) {
     scrollToBottom();
   }, [messages, scrollToBottom]);
 
-  useEffect(() => {
-    if (sessionId && userId) {
-      setupRealTimeChat();
-    }
-
-    return () => {
-      if (unsubscribeRef.current) {
-        unsubscribeRef.current();
-      }
-      if (typingTimeoutRef.current) {
-        clearTimeout(typingTimeoutRef.current);
-      }
-    };
-  }, [sessionId, userId]);
-
-  const setupRealTimeChat = () => {
+  const setupRealTimeChat = useCallback(() => {
     try {
       setLoading(true);
       
@@ -108,7 +93,22 @@ function SessionChat({ sessionId, userId, userName, partnerId, partnerName }) {
       console.error('Error setting up real-time chat:', error);
       setLoading(false);
     }
-  };
+  }, [sessionId, userId]);
+
+  useEffect(() => {
+    if (sessionId && userId) {
+      setupRealTimeChat();
+    }
+
+    return () => {
+      if (unsubscribeRef.current) {
+        unsubscribeRef.current();
+      }
+      if (typingTimeoutRef.current) {
+        clearTimeout(typingTimeoutRef.current);
+      }
+    };
+  }, [sessionId, userId, setupRealTimeChat]);
 
   const addSystemMessage = async (text) => {
     try {

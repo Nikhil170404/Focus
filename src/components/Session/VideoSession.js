@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
-import { doc, updateDoc, onSnapshot, serverTimestamp, getDoc } from 'firebase/firestore';
+import { doc, updateDoc, onSnapshot, serverTimestamp } from 'firebase/firestore';
 import { db } from '../../config/firebase';
 import { useAuth } from '../../hooks/useAuth';
 import SessionTimer from './SessionTimer';
@@ -15,7 +15,6 @@ import {
   FiMinimize2,
   FiClock,
   FiMessageCircle,
-  FiSettings,
   FiRefreshCw
 } from 'react-icons/fi';
 import toast from 'react-hot-toast';
@@ -38,6 +37,32 @@ function VideoSession() {
   const [connectionStatus, setConnectionStatus] = useState('connecting');
   const [showChat, setShowChat] = useState(false);
   const [retryAttempts, setRetryAttempts] = useState(0);
+  const [partnerConnected, setPartnerConnected] = useState(false);
+
+  // End session function
+  const endSession = useCallback(async () => {
+    try {
+      if (sessionId && session) {
+        await updateDoc(doc(db, 'sessions', sessionId), {
+          status: 'completed',
+          endedAt: serverTimestamp(),
+          actualDuration: session?.duration || 50
+        });
+      }
+
+      if (apiRef.current) {
+        apiRef.current.dispose();
+        apiRef.current = null;
+      }
+
+      toast.success('Session completed! Great work! 🎉');
+      navigate('/dashboard');
+    } catch (error) {
+      console.error('Error ending session:', error);
+      toast.error('Error ending session');
+      navigate('/dashboard');
+    }
+  }, [sessionId, session, navigate]);
 
   // Setup event listeners for Jitsi API
   const setupEventListeners = useCallback(() => {
@@ -63,6 +88,7 @@ function VideoSession() {
     apiRef.current.on('participantJoined', (participant) => {
       console.log('Participant joined:', participant);
       setConnectionStatus('connected');
+      setPartnerConnected(true);
       if (participant.id !== user.uid) {
         toast.success(`${participant.displayName || 'Study partner'} joined! 🎉`);
       }
@@ -70,8 +96,10 @@ function VideoSession() {
 
     apiRef.current.on('participantLeft', (participant) => {
       console.log('Participant left:', participant);
+      setPartnerConnected(false);
       if (participant.id !== user.uid) {
         toast(`${participant.displayName || 'Study partner'} left the session`);
+        setConnectionStatus('waiting');
       }
     });
 
@@ -86,7 +114,7 @@ function VideoSession() {
       setConnectionStatus('disconnected');
     });
 
-  }, [user.uid]);
+  }, [user.uid, endSession]);
 
   // Initialize Jitsi Meet
   const initializeJitsi = useCallback((sessionData) => {
@@ -136,7 +164,6 @@ function VideoSession() {
           'fodeviceselection',
           'hangup',
           'chat',
-          'settings',
           'videoquality'
         ]
       },
@@ -155,7 +182,6 @@ function VideoSession() {
           'fodeviceselection',
           'hangup',
           'chat',
-          'settings',
           'videoquality'
         ],
         SETTINGS_SECTIONS: ['devices', 'language', 'moderator', 'profile', 'calendar'],
@@ -187,7 +213,7 @@ function VideoSession() {
           apiRef.current = new window.JitsiMeetExternalAPI(domain, options);
           setupEventListeners();
           setLoading(false);
-          setConnectionStatus('connecting');
+          setConnectionStatus('waiting');
           toast.success('Video session started! 🎥');
         } catch (error) {
           console.error('Error initializing Jitsi:', error);
@@ -217,7 +243,7 @@ function VideoSession() {
         apiRef.current = new window.JitsiMeetExternalAPI(domain, options);
         setupEventListeners();
         setLoading(false);
-        setConnectionStatus('connecting');
+        setConnectionStatus('waiting');
         toast.success('Video session started! 🎥');
       } catch (error) {
         console.error('Error initializing Jitsi:', error);
@@ -226,31 +252,6 @@ function VideoSession() {
       }
     }
   }, [sessionId, user, setupEventListeners]);
-
-  // End session function
-  const endSession = useCallback(async () => {
-    try {
-      if (sessionId && session) {
-        await updateDoc(doc(db, 'sessions', sessionId), {
-          status: 'completed',
-          endedAt: serverTimestamp(),
-          actualDuration: session?.duration || 50
-        });
-      }
-
-      if (apiRef.current) {
-        apiRef.current.dispose();
-        apiRef.current = null;
-      }
-
-      toast.success('Session completed! Great work! 🎉');
-      navigate('/dashboard');
-    } catch (error) {
-      console.error('Error ending session:', error);
-      toast.error('Error ending session');
-      navigate('/dashboard');
-    }
-  }, [sessionId, session, navigate]);
 
   // Retry connection function
   const retryConnection = useCallback(() => {
@@ -381,6 +382,21 @@ function VideoSession() {
     }, 2000);
   }, [endSession]);
 
+  const getConnectionStatusText = () => {
+    switch (connectionStatus) {
+      case 'connecting':
+        return '🟡 Connecting to video...';
+      case 'waiting':
+        return partnerConnected ? '🟢 Connected' : '⏳ Waiting for partner to join';
+      case 'connected':
+        return '🟢 Connected with partner';
+      case 'disconnected':
+        return '🔴 Disconnected';
+      default:
+        return '🟡 Connecting...';
+    }
+  };
+
   // Error state
   if (error) {
     return (
@@ -430,9 +446,7 @@ function VideoSession() {
               <FiClock /> {session?.duration || 50} min session
             </span>
             <span className={`status-indicator ${connectionStatus}`}>
-              {connectionStatus === 'connected' && '🟢 Connected'}
-              {connectionStatus === 'connecting' && '🟡 Connecting...'}
-              {connectionStatus === 'disconnected' && '🔴 Disconnected'}
+              {getConnectionStatusText()}
             </span>
             {session?.partnerId && (
               <span className="partner-info">
@@ -500,6 +514,12 @@ function VideoSession() {
                     <div className="spinner"></div>
                     <p>Initializing video conference...</p>
                     <small>Please wait while we set up your session</small>
+                    {connectionStatus === 'waiting' && !partnerConnected && (
+                      <div className="partner-waiting">
+                        <p>🔗 Share your session link with your study partner</p>
+                        <p>⏳ Waiting for partner to join...</p>
+                      </div>
+                    )}
                   </div>
                 </div>
               )}
@@ -540,16 +560,24 @@ function VideoSession() {
           {session.partnerId ? (
             <div className="detail-item">
               <span>Study Partner</span>
-              <p className="status-active">
+              <p className={partnerConnected ? "status-active" : ""}>
                 {session.partnerName || 'Study Partner'}
+                {partnerConnected ? ' (Connected)' : ' (Not connected)'}
               </p>
             </div>
           ) : (
             <div className="detail-item">
               <span>Status</span>
-              <p>Waiting for partner...</p>
+              <p>🔍 Looking for study partner...</p>
+              <small>Others can join your session once they find it</small>
             </div>
           )}
+          <div className="detail-item">
+            <span>Connection</span>
+            <p className={connectionStatus === 'connected' ? 'status-active' : ''}>
+              {getConnectionStatusText()}
+            </p>
+          </div>
         </div>
       </div>
     </div>
