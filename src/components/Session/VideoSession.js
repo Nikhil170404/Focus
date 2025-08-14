@@ -213,7 +213,8 @@ function VideoSession() {
           apiRef.current = new window.JitsiMeetExternalAPI(domain, options);
           setupEventListeners();
           setLoading(false);
-          setConnectionStatus('waiting');
+          setJitsiReady(true);
+          setConnectionStatus('waiting'); // Set to waiting once Jitsi is ready
           toast.success('Video session started! 🎥');
         } catch (error) {
           console.error('Error initializing Jitsi:', error);
@@ -243,7 +244,8 @@ function VideoSession() {
         apiRef.current = new window.JitsiMeetExternalAPI(domain, options);
         setupEventListeners();
         setLoading(false);
-        setConnectionStatus('waiting');
+        setJitsiReady(true);
+        setConnectionStatus('waiting'); // Set to waiting once Jitsi is ready
         toast.success('Video session started! 🎥');
       } catch (error) {
         console.error('Error initializing Jitsi:', error);
@@ -387,9 +389,9 @@ function VideoSession() {
       case 'connecting':
         return '🟡 Connecting to video...';
       case 'waiting':
-        return partnerConnected ? '🟢 Connected' : '⏳ Waiting for partner to join';
+        return partnerConnected ? '🟢 Connected' : '⏳ Ready - Waiting for partner';
       case 'connected':
-        return '🟢 Connected with partner';
+        return partnerConnected ? '🟢 Connected with partner' : '🟢 Solo session active';
       case 'disconnected':
         return '🔴 Disconnected';
       default:
@@ -507,19 +509,34 @@ function VideoSession() {
           {/* Video Container */}
           <div className="video-main">
             <div ref={jitsiContainerRef} className="jitsi-container">
-              {/* Fallback content while Jitsi loads */}
-              {!jitsiReady && (
+              {/* Show different states based on connection */}
+              {(!jitsiReady || connectionStatus === 'waiting') && (
                 <div className="video-placeholder">
                   <div className="connection-status">
-                    <div className="spinner"></div>
-                    <p>Initializing video conference...</p>
-                    <small>Please wait while we set up your session</small>
-                    {connectionStatus === 'waiting' && !partnerConnected && (
-                      <div className="partner-waiting">
-                        <p>🔗 Share your session link with your study partner</p>
-                        <p>⏳ Waiting for partner to join...</p>
-                      </div>
-                    )}
+                    {!jitsiReady ? (
+                      <>
+                        <div className="spinner"></div>
+                        <p>Initializing video conference...</p>
+                        <small>Please wait while we set up your session</small>
+                      </>
+                    ) : connectionStatus === 'waiting' && !partnerConnected ? (
+                      <>
+                        <div className="waiting-icon">👥</div>
+                        <p>Ready to focus! 🎯</p>
+                        <small>Waiting for your study partner to join...</small>
+                        <div className="partner-waiting">
+                          <p>💡 Your session is ready and others can join</p>
+                          <p>🔗 They can find this session in the dashboard</p>
+                          <p>⏳ You can start solo or wait for a partner</p>
+                          <button 
+                            className="btn-primary start-solo-btn"
+                            onClick={() => setConnectionStatus('connected')}
+                          >
+                            Start Solo Session
+                          </button>
+                        </div>
+                      </>
+                    ) : null}
                   </div>
                 </div>
               )}
