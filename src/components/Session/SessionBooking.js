@@ -377,10 +377,13 @@ function SessionBooking() {
     
     try {
       // Check if there's already a partner waiting at this exact time
+      console.log('Checking for existing partner at time:', selectedTime);
       const partnerResult = await findExistingPartner(selectedTime);
+      console.log('Partner search result:', partnerResult);
       
       if (partnerResult.found) {
         // Join existing session as partner
+        console.log('Joining existing session:', partnerResult.sessionId);
         await updateDoc(doc(db, 'sessions', partnerResult.sessionId), {
           partnerId: user.uid,
           partnerName: user.displayName || user.email?.split('@')[0] || 'User',
@@ -390,9 +393,10 @@ function SessionBooking() {
         
         const partnerName = partnerResult.partnerName || 'Study Partner';
         toast.success(`Session booked with ${partnerName}! 🎯`);
-        navigate(`/session/${partnerResult.sessionId}`);
+        navigate(`/session/${partnerResult.sessionId}`); // Navigate to existing session
       } else {
         // Create new session and wait for partner
+        console.log('No existing partner found, creating new session');
         const sessionData = {
           userId: user.uid,
           userName: user.displayName || user.email?.split('@')[0] || 'User',
@@ -409,6 +413,7 @@ function SessionBooking() {
         };
 
         const docRef = await addDoc(collection(db, 'sessions'), sessionData);
+        console.log('Created new session:', docRef.id);
         
         toast.success('Session booked! Looking for a study partner... 📚');
         
@@ -440,6 +445,10 @@ function SessionBooking() {
 
   const findExistingPartner = async (startTime) => {
     try {
+      console.log('Searching for existing partner at time:', startTime);
+      console.log('Duration:', duration);
+      console.log('Current user:', user.uid);
+      
       // Look for exact match: same time, duration, and needs partner
       const q = query(
         collection(db, 'sessions'),
@@ -451,6 +460,18 @@ function SessionBooking() {
       );
       
       const snapshot = await getDocs(q);
+      console.log('Found sessions at this time:', snapshot.docs.length);
+      
+      snapshot.docs.forEach((doc, index) => {
+        const data = doc.data();
+        console.log(`Session ${index + 1}:`, {
+          id: doc.id,
+          userId: data.userId,
+          userName: data.userName,
+          partnerId: data.partnerId,
+          startTime: data.startTime
+        });
+      });
       
       // Find a session by someone else
       const partnerSession = snapshot.docs.find(docSnap => 
@@ -459,9 +480,12 @@ function SessionBooking() {
       
       if (partnerSession) {
         const partnerData = partnerSession.data();
+        console.log('Found partner session:', partnerSession.id);
+        console.log('Partner data:', partnerData);
         
         // Double-check that partner session is still available
         if (partnerData.partnerId) {
+          console.log('Partner session already has partner:', partnerData.partnerId);
           return { found: false };
         }
         
@@ -472,6 +496,7 @@ function SessionBooking() {
         };
       }
 
+      console.log('No partner session found');
       return { found: false };
     } catch (error) {
       console.error('Error finding existing partner:', error);

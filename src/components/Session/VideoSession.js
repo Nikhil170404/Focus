@@ -204,11 +204,18 @@ function VideoSession() {
       apiRef.current.on('participantJoined', (participant) => {
         if (!mountedRef.current || cleanupRef.current) return;
         console.log('Participant joined:', participant);
+        console.log('Current user ID:', user?.uid);
+        console.log('Participant ID:', participant.id);
         
         // Update participant count
-        setParticipantCount(prev => prev + 1);
+        setParticipantCount(prev => {
+          const newCount = prev + 1;
+          console.log('Participant count updated from', prev, 'to', newCount);
+          return newCount;
+        });
         
         if (participant.id !== user?.uid) {
+          console.log('Partner connected! Hiding waiting modal and starting session');
           setPartnerConnected(true);
           setConnectionStatus('connected');
           setShowWaitingModal(false);
@@ -223,11 +230,18 @@ function VideoSession() {
       apiRef.current.on('participantLeft', (participant) => {
         if (!mountedRef.current || cleanupRef.current) return;
         console.log('Participant left:', participant);
+        console.log('Participant ID that left:', participant.id);
+        console.log('Current user ID:', user?.uid);
         
         // Update participant count
-        setParticipantCount(prev => Math.max(0, prev - 1));
+        setParticipantCount(prev => {
+          const newCount = Math.max(1, prev - 1); // Never go below 1 (current user)
+          console.log('Participant count updated from', prev, 'to', newCount);
+          return newCount;
+        });
         
         if (participant.id !== user?.uid) {
+          console.log('Partner left! Showing waiting modal again');
           setPartnerConnected(false);
           setConnectionStatus('waiting');
           toast(`${participant.displayName || 'Study partner'} left the session`);
@@ -318,6 +332,10 @@ function VideoSession() {
 
     const roomName = `focusmate-${sessionId}`.replace(/[^a-zA-Z0-9-]/g, '');
     const domain = 'meet.jit.si';
+    
+    console.log('Creating Jitsi room:', roomName);
+    console.log('Session ID:', sessionId);
+    console.log('User:', user?.displayName || user?.email);
     
     const options = {
       roomName: roomName,
@@ -564,6 +582,8 @@ function VideoSession() {
             // Check if we have a partner
             const hasPartner = sessionData.partnerId && sessionData.partnerName;
             console.log('Session has partner:', hasPartner, sessionData.partnerId, sessionData.partnerName);
+            console.log('Current user is:', sessionData.userId === user.uid ? 'session owner' : 'partner');
+            console.log('Full session data:', sessionData);
             
             // Initialize Jitsi only once when we have session data and container is ready
             if (jitsiContainerRef.current && !initializationRef.current && !apiRef.current) {
