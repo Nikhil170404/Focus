@@ -11,7 +11,10 @@ import {
   serverTimestamp,
   onSnapshot,
   limit,
-  orderBy
+  orderBy,
+  runTransaction,
+  getDoc,
+  setDoc
 } from 'firebase/firestore';
 import { db } from '../../config/firebase';
 import { useAuth } from '../../hooks/useAuth';
@@ -72,6 +75,18 @@ function SessionBooking() {
 
   const [selectedCategory, setSelectedCategory] = useState('General');
 
+  // Generate time slot ID for consistent matching
+  const generateTimeSlotId = (startTime, duration) => {
+    const date = new Date(startTime);
+    const year = date.getFullYear();
+    const month = String(date.getMonth() + 1).padStart(2, '0');
+    const day = String(date.getDate()).padStart(2, '0');
+    const hour = String(date.getHours()).padStart(2, '0');
+    const minute = String(date.getMinutes()).padStart(2, '0');
+    
+    return `${year}-${month}-${day}T${hour}:${minute}-${duration}min`;
+  };
+
   const generateTimeSlots = useCallback(() => {
     const slots = [];
     const start = new Date(selectedDate);
@@ -88,13 +103,14 @@ function SessionBooking() {
         slots.push({
           time: format(slotTime, 'h:mm a'),
           value: slotTime.toISOString(),
-          hour: slotTime.getHours()
+          hour: slotTime.getHours(),
+          slotId: generateTimeSlotId(slotTime, duration)
         });
       }
     }
     
     setAvailableSlots(slots);
-  }, [selectedDate]);
+  }, [selectedDate, duration]);
 
   const checkBookedSlots = useCallback(async () => {
     setLoadingSlots(true);
@@ -113,39 +129,37 @@ function SessionBooking() {
       const endOfDay = new Date(selectedDate);
       endOfDay.setHours(23, 59, 59, 999);
       
-      // Query for all scheduled sessions on the selected date
-      const q = query(
-        collection(db, 'sessions'),
-        where('startTime', '>=', startOfDay.toISOString()),
-        where('startTime', '<=', endOfDay.toISOString()),
-        where('status', 'in', ['scheduled', 'active']),
-        limit(50) // Limit to prevent too much data
+      // Query time slots for this date
+      const dayString = format(selectedDate, 'yyyy-MM-dd');
+      const timeSlotsQuery = query(
+        collection(db, 'timeSlots'),
+        where('date', '==', dayString),
+        where('duration', '==', duration),
+        limit(50)
       );
       
-      const snapshot = await getDocs(q);
+      const snapshot = await getDocs(timeSlotsQuery);
       const booked = new Set();
       const partners = {};
       
       snapshot.docs.forEach(docSnap => {
-        const sessionData = docSnap.data();
-        const sessionStart = new Date(sessionData.startTime);
-        const sessionEnd = addHours(sessionStart, sessionData.duration / 60);
+        const slotData = docSnap.data();
+        const slotTime = slotData.startTime;
         
-        // Create time slots that are affected by this session
-        for (let time = new Date(sessionStart); time < sessionEnd; time = addHours(time, 0.5)) {
-          const timeKey = time.toISOString();
-          
-          // If session already has both user and partner, mark as fully booked
-          if (sessionData.partnerId && sessionData.userId) {
-            booked.add(timeKey);
-          } else if (sessionData.userId !== user.uid) {
-            // Available for partnering - someone is waiting
-            if (!partners[sessionData.startTime]) {
-              partners[sessionData.startTime] = [];
+        if (slotData.participants && slotData.participants.length >= 2) {
+          // Slot is full
+          booked.add(slotTime);
+        } else if (slotData.participants && slotData.participants.length === 1) {
+          // One person waiting for partner
+          const waitingUser = slotData.participants[0];
+          if (waitingUser.userId !== user.uid) {
+            if (!partners[slotTime]) {
+              partners[slotTime] = [];
             }
-            partners[sessionData.startTime].push({
+            partners[slotTime].push({
               id: docSnap.id,
-              ...sessionData
+              sessionId: slotData.sessionId,
+              ...waitingUser
             });
           }
         }
@@ -162,48 +176,7 @@ function SessionBooking() {
     } finally {
       setLoadingSlots(false);
     }
-  }, [selectedDate, user.uid]);
-
-  const checkPartnerAvailability = useCallback(async () => {
-    if (!selectedTime) return;
-
-    try {
-      const startTime = new Date(selectedTime);
-      const endTime = addHours(startTime, duration / 60);
-      
-      // Look for sessions in the same time range that are available for partnering
-      const q = query(
-        collection(db, 'sessions'),
-        where('startTime', '>=', startTime.toISOString()),
-        where('startTime', '<=', endTime.toISOString()),
-        where('status', '==', 'scheduled'),
-        where('partnerId', '==', null),
-        limit(20)
-      );
-      
-      const snapshot = await getDocs(q);
-      const availablePartners = {};
-      
-      snapshot.docs.forEach(docSnap => {
-        const sessionData = docSnap.data();
-        // Only include sessions from other users
-        if (sessionData.userId !== user.uid) {
-          const timeSlot = sessionData.startTime;
-          if (!availablePartners[timeSlot]) {
-            availablePartners[timeSlot] = [];
-          }
-          availablePartners[timeSlot].push({
-            id: docSnap.id,
-            ...sessionData
-          });
-        }
-      });
-      
-      setPartnersAvailable(prev => ({ ...prev, ...availablePartners }));
-    } catch (error) {
-      console.error('Error checking partner availability:', error);
-    }
-  }, [selectedTime, duration, user.uid]);
+  }, [selectedDate, duration, user.uid]);
 
   useEffect(() => {
     generateTimeSlots();
@@ -212,12 +185,6 @@ function SessionBooking() {
   useEffect(() => {
     checkBookedSlots();
   }, [selectedDate, duration, checkBookedSlots]);
-
-  useEffect(() => {
-    if (selectedTime) {
-      checkPartnerAvailability();
-    }
-  }, [selectedTime, duration, checkPartnerAvailability]);
 
   const formatDateLabel = (date) => {
     if (isToday(date)) return 'Today';
@@ -228,7 +195,7 @@ function SessionBooking() {
   const getTimeSlotClass = (slot) => {
     let className = 'time-slot';
     
-    // Check if this slot is fully booked (has both user and partner)
+    // Check if this slot is fully booked
     if (bookedSlots.has(slot.value)) {
       className += ' booked';
       return className;
@@ -260,6 +227,121 @@ function SessionBooking() {
     return bookedSlots.has(slotValue);
   };
 
+  // Atomic booking function using Firestore transactions
+  const bookSessionAtomic = async (startTime, sessionData) => {
+    try {
+      const slotId = generateTimeSlotId(startTime, duration);
+      const timeSlotRef = doc(db, 'timeSlots', slotId);
+      
+      console.log('Attempting atomic booking for slot:', slotId);
+      
+      const result = await runTransaction(db, async (transaction) => {
+        // Read the time slot document
+        const timeSlotDoc = await transaction.get(timeSlotRef);
+        
+        if (!timeSlotDoc.exists()) {
+          // Create new time slot with first participant
+          console.log('Creating new time slot');
+          const sessionRef = doc(collection(db, 'sessions'));
+          
+          // Create session data
+          const newSessionData = {
+            ...sessionData,
+            createdAt: serverTimestamp(),
+            status: 'scheduled',
+            partnerId: null,
+            partnerName: null,
+            partnerPhoto: null
+          };
+          
+          // Create session
+          transaction.set(sessionRef, newSessionData);
+          
+          // Create time slot
+          transaction.set(timeSlotRef, {
+            slotId: slotId,
+            date: format(new Date(startTime), 'yyyy-MM-dd'),
+            startTime: startTime,
+            duration: duration,
+            maxParticipants: 2,
+            sessionId: sessionRef.id,
+            participants: [{
+              userId: user.uid,
+              userName: user.displayName || user.email?.split('@')[0] || 'User',
+              userPhoto: user.photoURL || null,
+              joinedAt: serverTimestamp()
+            }],
+            createdAt: serverTimestamp()
+          });
+          
+          return {
+            success: true,
+            type: 'created',
+            sessionId: sessionRef.id,
+            partnerName: null
+          };
+          
+        } else {
+          // Time slot exists, try to join as partner
+          const slotData = timeSlotDoc.data();
+          
+          if (!slotData.participants || slotData.participants.length === 0) {
+            throw new Error('Invalid time slot data');
+          }
+          
+          if (slotData.participants.length >= 2) {
+            throw new Error('Time slot is already full');
+          }
+          
+          // Check if user is already in this slot
+          const userAlreadyBooked = slotData.participants.find(p => p.userId === user.uid);
+          if (userAlreadyBooked) {
+            throw new Error('You are already booked for this time slot');
+          }
+          
+          console.log('Joining existing time slot as partner');
+          const waitingParticipant = slotData.participants[0];
+          const sessionRef = doc(db, 'sessions', slotData.sessionId);
+          
+          // Update session with partner info
+          transaction.update(sessionRef, {
+            partnerId: user.uid,
+            partnerName: user.displayName || user.email?.split('@')[0] || 'User',
+            partnerPhoto: user.photoURL || null,
+            updatedAt: serverTimestamp()
+          });
+          
+          // Update time slot with second participant
+          transaction.update(timeSlotRef, {
+            participants: [
+              ...slotData.participants,
+              {
+                userId: user.uid,
+                userName: user.displayName || user.email?.split('@')[0] || 'User',
+                userPhoto: user.photoURL || null,
+                joinedAt: serverTimestamp()
+              }
+            ],
+            updatedAt: serverTimestamp()
+          });
+          
+          return {
+            success: true,
+            type: 'joined',
+            sessionId: slotData.sessionId,
+            partnerName: waitingParticipant.userName || 'Study Partner'
+          };
+        }
+      });
+      
+      return result;
+      
+    } catch (error) {
+      console.error('Transaction failed:', error);
+      throw error;
+    }
+  };
+
   const handleQuickMatch = async () => {
     if (!goal.trim()) {
       toast.error('Please enter your study goal first');
@@ -273,12 +355,11 @@ function SessionBooking() {
       const now = new Date();
       const endOfToday = endOfDay(now);
       
+      // Look for time slots with one participant waiting
+      const dayString = format(now, 'yyyy-MM-dd');
       const q = query(
-        collection(db, 'sessions'),
-        where('startTime', '>', now.toISOString()),
-        where('startTime', '<=', endOfToday.toISOString()),
-        where('status', '==', 'scheduled'),
-        where('partnerId', '==', null),
+        collection(db, 'timeSlots'),
+        where('date', '==', dayString),
         where('duration', '==', duration),
         orderBy('startTime', 'asc'),
         limit(10)
@@ -286,42 +367,45 @@ function SessionBooking() {
       
       const snapshot = await getDocs(q);
       
-      if (!snapshot.empty) {
-        // Find the first available session by someone else
-        const availableSession = snapshot.docs.find(docSnap => 
-          docSnap.data().userId !== user.uid
-        );
+      for (const docSnap of snapshot.docs) {
+        const slotData = docSnap.data();
+        const slotTime = new Date(slotData.startTime);
         
-        if (availableSession) {
-          const sessionData = availableSession.data();
-          const sessionId = availableSession.id;
+        // Check if slot is in the future and has exactly one participant
+        if (slotTime > now && 
+            slotData.participants && 
+            slotData.participants.length === 1 &&
+            slotData.participants[0].userId !== user.uid) {
           
-          // Check if the session is still available (no partner)
-          if (sessionData.partnerId) {
-            toast.error('Session was just taken by someone else. Try again!');
-            setLoading(false);
-            return;
+          try {
+            const sessionData = {
+              userId: user.uid,
+              userName: user.displayName || user.email?.split('@')[0] || 'User',
+              userPhoto: user.photoURL || null,
+              startTime: slotData.startTime,
+              endTime: addHours(new Date(slotData.startTime), duration / 60).toISOString(),
+              duration: duration,
+              goal: goal.trim()
+            };
+            
+            const result = await bookSessionAtomic(slotData.startTime, sessionData);
+            
+            if (result.success && result.type === 'joined') {
+              toast.success(`Quick match found! Paired with ${result.partnerName} 🎉`);
+              navigate(`/session/${result.sessionId}`);
+              return;
+            }
+          } catch (error) {
+            console.log('Failed to join slot, trying next one:', error.message);
+            continue;
           }
-          
-          // Update the existing session to add us as partner
-          await updateDoc(doc(db, 'sessions', sessionId), {
-            partnerId: user.uid,
-            partnerName: user.displayName || user.email?.split('@')[0] || 'User',
-            partnerPhoto: user.photoURL || null,
-            updatedAt: serverTimestamp()
-          });
-          
-          const partnerName = sessionData.userName || 'Study Partner';
-          toast.success(`Quick match found! Paired with ${partnerName} 🎉`);
-          navigate(`/session/${sessionId}`);
-          return;
         }
       }
       
-      // No quick match found, create a session and wait for partner
+      // No quick match found, create a session for the next available slot
       const nextSlot = availableSlots.find(slot => {
         const slotTime = new Date(slot.value);
-        return slotTime > addHours(now, 0.5) && !bookedSlots.has(slot.value); // At least 30 minutes from now and not booked
+        return slotTime > addHours(now, 0.5) && !bookedSlots.has(slot.value);
       });
       
       if (nextSlot) {
@@ -332,19 +416,15 @@ function SessionBooking() {
           startTime: nextSlot.value,
           endTime: addHours(new Date(nextSlot.value), duration / 60).toISOString(),
           duration: duration,
-          goal: goal.trim(),
-          status: 'scheduled',
-          createdAt: serverTimestamp(),
-          partnerId: null,
-          partnerName: null,
-          partnerPhoto: null,
-          quickMatch: true
+          goal: goal.trim()
         };
 
-        const docRef = await addDoc(collection(db, 'sessions'), sessionData);
+        const result = await bookSessionAtomic(nextSlot.value, sessionData);
         
-        toast.success('Session created! Waiting for a study partner to join 📚');
-        navigate(`/session/${docRef.id}`);
+        if (result.success) {
+          toast.success('Session created! Waiting for a study partner to join 📚');
+          navigate(`/session/${result.sessionId}`);
+        }
       } else {
         toast.error('No available slots for quick match today');
       }
@@ -376,132 +456,57 @@ function SessionBooking() {
     setLoading(true);
     
     try {
-      // Check if there's already a partner waiting at this exact time
-      console.log('Checking for existing partner at time:', selectedTime);
-      const partnerResult = await findExistingPartner(selectedTime);
-      console.log('Partner search result:', partnerResult);
-      
-      if (partnerResult.found) {
-        // Join existing session as partner
-        console.log('Joining existing session:', partnerResult.sessionId);
-        await updateDoc(doc(db, 'sessions', partnerResult.sessionId), {
-          partnerId: user.uid,
-          partnerName: user.displayName || user.email?.split('@')[0] || 'User',
-          partnerPhoto: user.photoURL || null,
-          updatedAt: serverTimestamp()
-        });
-        
-        const partnerName = partnerResult.partnerName || 'Study Partner';
-        toast.success(`Session booked with ${partnerName}! 🎯`);
-        navigate(`/session/${partnerResult.sessionId}`); // Navigate to existing session
-      } else {
-        // Create new session and wait for partner
-        console.log('No existing partner found, creating new session');
-        const sessionData = {
-          userId: user.uid,
-          userName: user.displayName || user.email?.split('@')[0] || 'User',
-          userPhoto: user.photoURL || null,
-          startTime: selectedTime,
-          endTime: addHours(new Date(selectedTime), duration / 60).toISOString(),
-          duration: duration,
-          goal: goal.trim(),
-          status: 'scheduled',
-          createdAt: serverTimestamp(),
-          partnerId: null,
-          partnerName: null,
-          partnerPhoto: null
-        };
+      const sessionData = {
+        userId: user.uid,
+        userName: user.displayName || user.email?.split('@')[0] || 'User',
+        userPhoto: user.photoURL || null,
+        startTime: selectedTime,
+        endTime: addHours(new Date(selectedTime), duration / 60).toISOString(),
+        duration: duration,
+        goal: goal.trim()
+      };
 
-        const docRef = await addDoc(collection(db, 'sessions'), sessionData);
-        console.log('Created new session:', docRef.id);
-        
-        toast.success('Session booked! Looking for a study partner... 📚');
-        
-        // Set up real-time listener for partner matching
-        const unsubscribe = onSnapshot(doc(db, 'sessions', docRef.id), (docSnap) => {
-          if (docSnap.exists()) {
-            const data = docSnap.data();
-            if (data.partnerId && data.partnerName && data.partnerId !== user.uid) {
-              toast.success(`Partner found: ${data.partnerName}! 🤝`);
-              unsubscribe();
+      const result = await bookSessionAtomic(selectedTime, sessionData);
+      
+      if (result.success) {
+        if (result.type === 'joined') {
+          toast.success(`Session booked with ${result.partnerName}! 🎯`);
+        } else {
+          toast.success('Session booked! Looking for a study partner... 📚');
+          
+          // Set up real-time listener for partner matching
+          const unsubscribe = onSnapshot(doc(db, 'sessions', result.sessionId), (docSnap) => {
+            if (docSnap.exists()) {
+              const data = docSnap.data();
+              if (data.partnerId && data.partnerName && data.partnerId !== user.uid) {
+                toast.success(`Partner found: ${data.partnerName}! 🤝`);
+                unsubscribe();
+              }
             }
-          }
-        });
+          });
+          
+          // Stop listening after 5 minutes
+          setTimeout(() => {
+            unsubscribe();
+          }, 300000);
+        }
         
-        // Stop listening after 5 minutes
-        setTimeout(() => {
-          unsubscribe();
-        }, 300000);
-        
-        navigate(`/session/${docRef.id}`);
+        navigate(`/session/${result.sessionId}`);
       }
     } catch (error) {
       console.error('Error booking session:', error);
-      toast.error('Failed to book session. Please try again.');
+      
+      if (error.message === 'Time slot is already full') {
+        toast.error('This time slot just got filled by someone else. Please select another time.');
+        checkBookedSlots(); // Refresh slot availability
+      } else if (error.message === 'You are already booked for this time slot') {
+        toast.error('You already have a session at this time.');
+      } else {
+        toast.error('Failed to book session. Please try again.');
+      }
     }
     
     setLoading(false);
-  };
-
-  const findExistingPartner = async (startTime) => {
-    try {
-      console.log('Searching for existing partner at time:', startTime);
-      console.log('Duration:', duration);
-      console.log('Current user:', user.uid);
-      
-      // Look for exact match: same time, duration, and needs partner
-      const q = query(
-        collection(db, 'sessions'),
-        where('startTime', '==', startTime),
-        where('duration', '==', duration),
-        where('status', '==', 'scheduled'),
-        where('partnerId', '==', null),
-        limit(5)
-      );
-      
-      const snapshot = await getDocs(q);
-      console.log('Found sessions at this time:', snapshot.docs.length);
-      
-      snapshot.docs.forEach((doc, index) => {
-        const data = doc.data();
-        console.log(`Session ${index + 1}:`, {
-          id: doc.id,
-          userId: data.userId,
-          userName: data.userName,
-          partnerId: data.partnerId,
-          startTime: data.startTime
-        });
-      });
-      
-      // Find a session by someone else
-      const partnerSession = snapshot.docs.find(docSnap => 
-        docSnap.data().userId !== user.uid
-      );
-      
-      if (partnerSession) {
-        const partnerData = partnerSession.data();
-        console.log('Found partner session:', partnerSession.id);
-        console.log('Partner data:', partnerData);
-        
-        // Double-check that partner session is still available
-        if (partnerData.partnerId) {
-          console.log('Partner session already has partner:', partnerData.partnerId);
-          return { found: false };
-        }
-        
-        return {
-          found: true,
-          sessionId: partnerSession.id,
-          partnerName: partnerData.userName || 'Study Partner'
-        };
-      }
-
-      console.log('No partner session found');
-      return { found: false };
-    } catch (error) {
-      console.error('Error finding existing partner:', error);
-      return { found: false };
-    }
   };
 
   const handleGoalSuggestionClick = (suggestion) => {

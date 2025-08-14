@@ -336,6 +336,7 @@ function VideoSession() {
     console.log('Creating Jitsi room:', roomName);
     console.log('Session ID:', sessionId);
     console.log('User:', user?.displayName || user?.email);
+    console.log('Session data for Jitsi:', sessionData);
     
     const options = {
       roomName: roomName,
