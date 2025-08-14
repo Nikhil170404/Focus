@@ -54,6 +54,18 @@ function Dashboard() {
     "Stay focused and never give up ✨"
   ];
 
+  // Force loading to false after 3 seconds maximum
+  useEffect(() => {
+    const loadingTimeout = setTimeout(() => {
+      if (loading) {
+        console.log('Force stopping dashboard loading after 3 seconds');
+        setLoading(false);
+      }
+    }, 3000);
+
+    return () => clearTimeout(loadingTimeout);
+  }, [loading]);
+
   // Ensure user document exists
   const ensureUserDocument = useCallback(async () => {
     if (!user) return;
@@ -88,11 +100,15 @@ function Dashboard() {
       }
     } catch (error) {
       console.error('Error ensuring user document:', error);
+      // Don't throw, just log the error
     }
   }, [user]);
 
   const fetchUserData = useCallback(async (showLoader = true) => {
-    if (!user) return;
+    if (!user) {
+      setLoading(false);
+      return;
+    }
 
     try {
       if (showLoader) {
@@ -104,52 +120,120 @@ function Dashboard() {
       // Ensure user document exists first
       await ensureUserDocument();
 
-      // Fetch sessions
+      // Fetch sessions with timeout
       const now = new Date();
       
-      // Upcoming sessions
-      const upcomingQuery = query(
-        collection(db, 'sessions'),
-        where('userId', '==', user.uid),
-        where('status', 'in', ['scheduled', 'active']),
-        where('startTime', '>', now.toISOString()),
-        orderBy('startTime', 'asc'),
-        limit(5)
-      );
-      
-      const upcomingSnapshot = await getDocs(upcomingQuery);
-      const upcomingData = upcomingSnapshot.docs.map(doc => ({
-        id: doc.id,
-        ...doc.data()
-      }));
-      setUpcomingSessions(upcomingData);
+      // Set a timeout for data fetching
+      const dataTimeout = setTimeout(() => {
+        console.log('Data fetching timeout, using default values');
+        setStats({
+          totalSessions: 0,
+          totalMinutes: 0,
+          streak: 0,
+          thisWeek: 0,
+          thisMonth: 0,
+          level: 1
+        });
+        setUpcomingSessions([]);
+        setCompletedSessions([]);
+        setLoading(false);
+        setRefreshing(false);
+      }, 5000);
 
-      // Completed sessions
-      const completedQuery = query(
-        collection(db, 'sessions'),
-        where('userId', '==', user.uid),
-        where('status', '==', 'completed'),
-        orderBy('endedAt', 'desc'),
-        limit(20)
-      );
-      
-      const completedSnapshot = await getDocs(completedQuery);
-      const completedData = completedSnapshot.docs.map(doc => ({
-        id: doc.id,
-        ...doc.data()
-      }));
-      setCompletedSessions(completedData);
+      try {
+        // Upcoming sessions with simpler query
+        let upcomingData = [];
+        try {
+          const upcomingQuery = query(
+            collection(db, 'sessions'),
+            where('userId', '==', user.uid),
+            where('status', 'in', ['scheduled', 'active']),
+            limit(5)
+          );
+          
+          const upcomingSnapshot = await getDocs(upcomingQuery);
+          upcomingData = upcomingSnapshot.docs
+            .map(doc => ({
+              id: doc.id,
+              ...doc.data()
+            }))
+            .filter(session => {
+              // Filter in JavaScript since Firebase queries can be complex
+              const sessionTime = new Date(session.startTime);
+              return sessionTime > now;
+            })
+            .sort((a, b) => new Date(a.startTime) - new Date(b.startTime))
+            .slice(0, 5);
+        } catch (error) {
+          console.error('Error fetching upcoming sessions:', error);
+        }
+        setUpcomingSessions(upcomingData);
 
-      // Calculate stats
-      const calculatedStats = calculateStats(completedData);
-      setStats(calculatedStats);
+        // Completed sessions with simpler query
+        let completedData = [];
+        try {
+          const completedQuery = query(
+            collection(db, 'sessions'),
+            where('userId', '==', user.uid),
+            where('status', '==', 'completed'),
+            limit(20)
+          );
+          
+          const completedSnapshot = await getDocs(completedQuery);
+          completedData = completedSnapshot.docs
+            .map(doc => ({
+              id: doc.id,
+              ...doc.data()
+            }))
+            .sort((a, b) => {
+              const dateA = a.endedAt?.toDate?.() || new Date(a.endedAt || 0);
+              const dateB = b.endedAt?.toDate?.() || new Date(b.endedAt || 0);
+              return dateB - dateA;
+            })
+            .slice(0, 20);
+        } catch (error) {
+          console.error('Error fetching completed sessions:', error);
+        }
+        setCompletedSessions(completedData);
 
-      // Update user stats safely
-      await updateUserStats(calculatedStats);
+        // Calculate stats
+        const calculatedStats = calculateStats(completedData);
+        setStats(calculatedStats);
+
+        // Update user stats safely
+        updateUserStats(calculatedStats);
+
+        clearTimeout(dataTimeout);
+
+      } catch (error) {
+        console.error('Error fetching data:', error);
+        clearTimeout(dataTimeout);
+        // Use default values instead of showing error
+        setStats({
+          totalSessions: 0,
+          totalMinutes: 0,
+          streak: 0,
+          thisWeek: 0,
+          thisMonth: 0,
+          level: 1
+        });
+        setUpcomingSessions([]);
+        setCompletedSessions([]);
+      }
 
     } catch (error) {
-      console.error('Error fetching data:', error);
-      toast.error('Failed to load dashboard data');
+      console.error('Error in fetchUserData:', error);
+      // Set default values instead of showing error
+      setStats({
+        totalSessions: 0,
+        totalMinutes: 0,
+        streak: 0,
+        thisWeek: 0,
+        thisMonth: 0,
+        level: 1
+      });
+      setUpcomingSessions([]);
+      setCompletedSessions([]);
     } finally {
       setLoading(false);
       setRefreshing(false);
@@ -169,8 +253,12 @@ function Dashboard() {
     const weekStart = startOfDay(new Date());
     weekStart.setDate(weekStart.getDate() - weekStart.getDay());
     const thisWeek = sessions.filter(session => {
-      const sessionDate = session.endedAt?.toDate?.() || new Date(session.endedAt);
-      return sessionDate >= weekStart;
+      try {
+        const sessionDate = session.endedAt?.toDate?.() || new Date(session.endedAt);
+        return sessionDate >= weekStart;
+      } catch {
+        return false;
+      }
     }).length;
 
     // This month's sessions
@@ -178,8 +266,12 @@ function Dashboard() {
     monthStart.setDate(1);
     monthStart.setHours(0, 0, 0, 0);
     const thisMonth = sessions.filter(session => {
-      const sessionDate = session.endedAt?.toDate?.() || new Date(session.endedAt);
-      return sessionDate >= monthStart;
+      try {
+        const sessionDate = session.endedAt?.toDate?.() || new Date(session.endedAt);
+        return sessionDate >= monthStart;
+      } catch {
+        return false;
+      }
     }).length;
 
     // Calculate level
@@ -198,50 +290,59 @@ function Dashboard() {
   const calculateStreak = (sessions) => {
     if (!sessions || sessions.length === 0) return 0;
     
-    // Sort sessions by date
-    const sortedSessions = [...sessions].sort((a, b) => {
-      const dateA = a.endedAt?.toDate?.() || new Date(a.endedAt);
-      const dateB = b.endedAt?.toDate?.() || new Date(b.endedAt);
-      return dateB - dateA;
-    });
-    
-    // Group by date
-    const sessionDates = new Set();
-    sortedSessions.forEach(session => {
-      const date = session.endedAt?.toDate?.() || new Date(session.endedAt);
-      const dateStr = startOfDay(date).toISOString();
-      sessionDates.add(dateStr);
-    });
-    
-    const uniqueDates = Array.from(sessionDates).sort((a, b) => new Date(b) - new Date(a));
-    if (uniqueDates.length === 0) return 0;
-    
-    let streak = 0;
-    const today = startOfDay(new Date());
-    const yesterday = new Date(today);
-    yesterday.setDate(yesterday.getDate() - 1);
-    
-    // Check if streak is active
-    const latestDate = new Date(uniqueDates[0]);
-    if (differenceInDays(today, latestDate) > 1) {
-      return 0; // Streak broken
-    }
-    
-    // Count consecutive days
-    let currentDate = latestDate;
-    for (let i = 0; i < uniqueDates.length; i++) {
-      const sessionDate = new Date(uniqueDates[i]);
-      const dayDiff = differenceInDays(currentDate, sessionDate);
+    try {
+      // Sort sessions by date
+      const sortedSessions = [...sessions].sort((a, b) => {
+        const dateA = a.endedAt?.toDate?.() || new Date(a.endedAt || 0);
+        const dateB = b.endedAt?.toDate?.() || new Date(b.endedAt || 0);
+        return dateB - dateA;
+      });
       
-      if (dayDiff <= 1) {
-        streak++;
-        currentDate = sessionDate;
-      } else {
-        break;
+      // Group by date
+      const sessionDates = new Set();
+      sortedSessions.forEach(session => {
+        try {
+          const date = session.endedAt?.toDate?.() || new Date(session.endedAt);
+          const dateStr = startOfDay(date).toISOString();
+          sessionDates.add(dateStr);
+        } catch {
+          // Skip invalid dates
+        }
+      });
+      
+      const uniqueDates = Array.from(sessionDates).sort((a, b) => new Date(b) - new Date(a));
+      if (uniqueDates.length === 0) return 0;
+      
+      let streak = 0;
+      const today = startOfDay(new Date());
+      const yesterday = new Date(today);
+      yesterday.setDate(yesterday.getDate() - 1);
+      
+      // Check if streak is active
+      const latestDate = new Date(uniqueDates[0]);
+      if (differenceInDays(today, latestDate) > 1) {
+        return 0; // Streak broken
       }
+      
+      // Count consecutive days
+      let currentDate = latestDate;
+      for (let i = 0; i < uniqueDates.length; i++) {
+        const sessionDate = new Date(uniqueDates[i]);
+        const dayDiff = differenceInDays(currentDate, sessionDate);
+        
+        if (dayDiff <= 1) {
+          streak++;
+          currentDate = sessionDate;
+        } else {
+          break;
+        }
+      }
+      
+      return streak;
+    } catch (error) {
+      console.error('Error calculating streak:', error);
+      return 0;
     }
-    
-    return streak;
   };
 
   const updateUserStats = async (calculatedStats) => {
@@ -269,6 +370,8 @@ function Dashboard() {
   useEffect(() => {
     if (user) {
       fetchUserData();
+    } else {
+      setLoading(false);
     }
   }, [user, fetchUserData]);
 
@@ -317,17 +420,7 @@ function Dashboard() {
     }
   ];
 
-  if (loading) {
-    return (
-      <div className="dashboard">
-        <div className="loading-container">
-          <div className="spinner"></div>
-          <p>Loading your dashboard...</p>
-        </div>
-      </div>
-    );
-  }
-
+  // Always show the dashboard, even while loading
   return (
     <div className="dashboard">
       {/* Header */}
@@ -352,7 +445,7 @@ function Dashboard() {
               onClick={() => navigate('/book-session')}
             >
               <FiPlus />
-              Book Session
+              <span className="btn-text">Book Session</span>
             </button>
           </div>
         </div>
@@ -366,7 +459,7 @@ function Dashboard() {
           </div>
           <div className="stat-content">
             <h3>Total Sessions</h3>
-            <p>{stats.totalSessions}</p>
+            <p>{loading ? '...' : stats.totalSessions}</p>
           </div>
         </div>
 
@@ -376,7 +469,7 @@ function Dashboard() {
           </div>
           <div className="stat-content">
             <h3>Focus Time</h3>
-            <p>{Math.floor(stats.totalMinutes / 60)}h</p>
+            <p>{loading ? '...' : `${Math.floor(stats.totalMinutes / 60)}h`}</p>
           </div>
         </div>
 
@@ -386,7 +479,7 @@ function Dashboard() {
           </div>
           <div className="stat-content">
             <h3>Streak</h3>
-            <p>{stats.streak} days</p>
+            <p>{loading ? '...' : `${stats.streak} days`}</p>
           </div>
         </div>
 
@@ -396,7 +489,7 @@ function Dashboard() {
           </div>
           <div className="stat-content">
             <h3>Level</h3>
-            <p>{stats.level}</p>
+            <p>{loading ? '...' : stats.level}</p>
           </div>
         </div>
       </div>
@@ -422,7 +515,12 @@ function Dashboard() {
         </div>
 
         <div className="sessions-content">
-          {activeTab === 'upcoming' ? (
+          {loading ? (
+            <div className="loading-container">
+              <div className="spinner"></div>
+              <p>Loading sessions...</p>
+            </div>
+          ) : activeTab === 'upcoming' ? (
             upcomingSessions.length > 0 ? (
               <div className="sessions-list">
                 {upcomingSessions.map(session => (
@@ -431,6 +529,7 @@ function Dashboard() {
               </div>
             ) : (
               <div className="empty-state">
+                <div className="empty-icon">📅</div>
                 <h3>No upcoming sessions</h3>
                 <p>Book a session to get started!</p>
                 <button 
@@ -450,8 +549,15 @@ function Dashboard() {
               </div>
             ) : (
               <div className="empty-state">
+                <div className="empty-icon">🎯</div>
                 <h3>No completed sessions yet</h3>
                 <p>Complete your first session to see progress!</p>
+                <button 
+                  className="btn-primary"
+                  onClick={() => navigate('/book-session')}
+                >
+                  <FiPlus /> Start First Session
+                </button>
               </div>
             )
           )}

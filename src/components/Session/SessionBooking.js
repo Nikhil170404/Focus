@@ -98,6 +98,14 @@ function SessionBooking() {
 
   const checkBookedSlots = useCallback(async () => {
     setLoadingSlots(true);
+    
+    // Set timeout to prevent infinite loading
+    const timeout = setTimeout(() => {
+      setLoadingSlots(false);
+      setBookedSlots(new Set());
+      setPartnersAvailable({});
+    }, 3000);
+
     try {
       const startOfDay = new Date(selectedDate);
       startOfDay.setHours(0, 0, 0, 0);
@@ -110,7 +118,8 @@ function SessionBooking() {
         collection(db, 'sessions'),
         where('startTime', '>=', startOfDay.toISOString()),
         where('startTime', '<=', endOfDay.toISOString()),
-        where('status', 'in', ['scheduled', 'active'])
+        where('status', 'in', ['scheduled', 'active']),
+        limit(50) // Limit to prevent too much data
       );
       
       const snapshot = await getDocs(q);
@@ -142,12 +151,17 @@ function SessionBooking() {
         }
       });
       
+      clearTimeout(timeout);
       setBookedSlots(booked);
       setPartnersAvailable(partners);
     } catch (error) {
       console.error('Error checking booked slots:', error);
+      clearTimeout(timeout);
+      setBookedSlots(new Set());
+      setPartnersAvailable({});
+    } finally {
+      setLoadingSlots(false);
     }
-    setLoadingSlots(false);
   }, [selectedDate, user.uid]);
 
   const checkPartnerAvailability = useCallback(async () => {
