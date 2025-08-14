@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { 
   collection, 
@@ -15,7 +15,7 @@ import {
 } from 'firebase/firestore';
 import { db } from '../../config/firebase';
 import { useAuth } from '../../hooks/useAuth';
-import { addDays, addHours, format, isToday, isTomorrow, startOfDay, endOfDay } from 'date-fns';
+import { addDays, addHours, format, isToday, isTomorrow, endOfDay } from 'date-fns';
 import { FiCalendar, FiClock, FiTarget, FiArrowLeft, FiUsers, FiZap } from 'react-icons/fi';
 import toast from 'react-hot-toast';
 
@@ -31,7 +31,6 @@ function SessionBooking() {
   const [loading, setLoading] = useState(false);
   const [availableSlots, setAvailableSlots] = useState([]);
   const [partnersAvailable, setPartnersAvailable] = useState({});
-  const [quickMatch, setQuickMatch] = useState(false);
 
   // Enhanced goal suggestions categorized by exam/subject
   const goalCategories = {
@@ -71,14 +70,7 @@ function SessionBooking() {
 
   const [selectedCategory, setSelectedCategory] = useState('General');
 
-  useEffect(() => {
-    generateTimeSlots();
-    if (selectedTime) {
-      checkPartnerAvailability();
-    }
-  }, [selectedDate, selectedTime, duration]);
-
-  const generateTimeSlots = () => {
+  const generateTimeSlots = useCallback(() => {
     const slots = [];
     const start = new Date(selectedDate);
     start.setHours(6, 0, 0, 0); // Start from 6 AM
@@ -100,16 +92,16 @@ function SessionBooking() {
     }
     
     setAvailableSlots(slots);
-  };
+  }, [selectedDate]);
 
-  const checkPartnerAvailability = async () => {
+  const checkPartnerAvailability = useCallback(async () => {
     if (!selectedTime) return;
 
     try {
       const startTime = new Date(selectedTime);
       const endTime = addHours(startTime, duration / 60);
       
-      // Look for sessions in the same time range
+      // Look for sessions in the same time range that are available for partnering
       const q = query(
         collection(db, 'sessions'),
         where('startTime', '>=', startTime.toISOString()),
@@ -122,15 +114,16 @@ function SessionBooking() {
       const snapshot = await getDocs(q);
       const availablePartners = {};
       
-      snapshot.docs.forEach(doc => {
-        const sessionData = doc.data();
+      snapshot.docs.forEach(docSnap => {
+        const sessionData = docSnap.data();
+        // Only include sessions from other users
         if (sessionData.userId !== user.uid) {
           const timeSlot = sessionData.startTime;
           if (!availablePartners[timeSlot]) {
             availablePartners[timeSlot] = [];
           }
           availablePartners[timeSlot].push({
-            id: doc.id,
+            id: docSnap.id,
             ...sessionData
           });
         }
@@ -139,8 +132,16 @@ function SessionBooking() {
       setPartnersAvailable(availablePartners);
     } catch (error) {
       console.error('Error checking partner availability:', error);
+      // Don't show error to user for this, it's background functionality
     }
-  };
+  }, [selectedTime, duration, user.uid]);
+
+  useEffect(() => {
+    generateTimeSlots();
+    if (selectedTime) {
+      checkPartnerAvailability();
+    }
+  }, [selectedDate, selectedTime, duration, generateTimeSlots, checkPartnerAvailability]);
 
   const formatDateLabel = (date) => {
     if (isToday(date)) return 'Today';
@@ -180,6 +181,7 @@ function SessionBooking() {
     }
 
     setLoading(true);
+    
     try {
       // Find the next available session with a partner
       const now = new Date();
@@ -200,8 +202,8 @@ function SessionBooking() {
       
       if (!snapshot.empty) {
         // Find the first available session by someone else
-        const availableSession = snapshot.docs.find(doc => 
-          doc.data().userId !== user.uid
+        const availableSession = snapshot.docs.find(docSnap => 
+          docSnap.data().userId !== user.uid
         );
         
         if (availableSession) {
@@ -211,7 +213,7 @@ function SessionBooking() {
           // Create our session and pair immediately
           const newSessionData = {
             userId: user.uid,
-            userName: user.displayName || user.email,
+            userName: user.displayName || user.email?.split('@')[0] || 'User',
             userPhoto: user.photoURL,
             startTime: sessionData.startTime,
             endTime: sessionData.endTime,
@@ -230,11 +232,12 @@ function SessionBooking() {
           // Update the partner's session
           await updateDoc(doc(db, 'sessions', sessionId), {
             partnerId: user.uid,
-            partnerName: user.displayName || user.email,
-            partnerPhoto: user.photoURL
+            partnerName: user.displayName || user.email?.split('@')[0] || 'User',
+            partnerPhoto: user.photoURL || null
           });
           
-          toast.success(`Quick match found! Paired with ${sessionData.userName}`);
+          const partnerName = sessionData.userName || 'Study Partner';
+          toast.success(`Quick match found! Paired with ${partnerName} 🎉`);
           navigate(`/session/${docRef.id}`);
           return;
         }
@@ -249,22 +252,23 @@ function SessionBooking() {
       if (nextSlot) {
         const sessionData = {
           userId: user.uid,
-          userName: user.displayName || user.email,
-          userPhoto: user.photoURL,
+          userName: user.displayName || user.email?.split('@')[0] || 'User',
+          userPhoto: user.photoURL || null,
           startTime: nextSlot.value,
           endTime: addHours(new Date(nextSlot.value), duration / 60).toISOString(),
           duration: duration,
           goal: goal.trim(),
           status: 'scheduled',
           createdAt: serverTimestamp(),
-          partner: null,
           partnerId: null,
+          partnerName: null,
+          partnerPhoto: null,
           quickMatch: true
         };
 
-        const docRef = await addDoc(collection(db, 'sessions'), sessionData);
+        await addDoc(collection(db, 'sessions'), sessionData);
         
-        toast.success('Session created! Waiting for a study partner to join.');
+        toast.success('Session created! Waiting for a study partner to join 📚');
         navigate('/dashboard');
       } else {
         toast.error('No available slots for quick match today');
@@ -272,8 +276,9 @@ function SessionBooking() {
       
     } catch (error) {
       console.error('Error in quick match:', error);
-      toast.error('Failed to find quick match');
+      toast.error('Failed to find quick match. Please try manual booking.');
     }
+    
     setLoading(false);
   };
 
@@ -288,37 +293,40 @@ function SessionBooking() {
     }
 
     setLoading(true);
+    
     try {
       const sessionData = {
         userId: user.uid,
-        userName: user.displayName || user.email,
-        userPhoto: user.photoURL,
+        userName: user.displayName || user.email?.split('@')[0] || 'User',
+        userPhoto: user.photoURL || null,
         startTime: selectedTime,
         endTime: addHours(new Date(selectedTime), duration / 60).toISOString(),
         duration: duration,
         goal: goal.trim(),
         status: 'scheduled',
         createdAt: serverTimestamp(),
-        partner: null,
-        partnerId: null
+        partnerId: null,
+        partnerName: null,
+        partnerPhoto: null
       };
 
       const docRef = await addDoc(collection(db, 'sessions'), sessionData);
       
       // Try to find a partner immediately
-      const partnerFound = await findPartner(docRef.id, sessionData);
+      const partnerResult = await findPartner(docRef.id, sessionData);
       
-      if (partnerFound) {
-        toast.success(`Session booked with ${partnerFound.partnerName}!`);
+      if (partnerResult.found) {
+        const partnerName = partnerResult.partnerName || 'Study Partner';
+        toast.success(`Session booked with ${partnerName}! 🎯`);
       } else {
-        toast.success('Session booked! Looking for a study partner...');
+        toast.success('Session booked! Looking for a study partner... 📚');
         
         // Set up real-time listener for partner matching
-        const unsubscribe = onSnapshot(doc(db, 'sessions', docRef.id), (doc) => {
-          if (doc.exists()) {
-            const data = doc.data();
-            if (data.partnerId && data.partnerName) {
-              toast.success(`Partner found: ${data.partnerName}!`);
+        const unsubscribe = onSnapshot(doc(db, 'sessions', docRef.id), (docSnap) => {
+          if (docSnap.exists()) {
+            const data = docSnap.data();
+            if (data.partnerId && data.partnerName && data.partnerId !== user.uid) {
+              toast.success(`Partner found: ${data.partnerName}! 🤝`);
               unsubscribe();
             }
           }
@@ -333,8 +341,9 @@ function SessionBooking() {
       navigate('/dashboard');
     } catch (error) {
       console.error('Error booking session:', error);
-      toast.error('Failed to book session');
+      toast.error('Failed to book session. Please try again.');
     }
+    
     setLoading(false);
   };
 
@@ -353,8 +362,8 @@ function SessionBooking() {
       const snapshot = await getDocs(q);
       
       // Find a session by someone else
-      const partnerSession = snapshot.docs.find(doc => 
-        doc.data().userId !== user.uid
+      const partnerSession = snapshot.docs.find(docSnap => 
+        docSnap.data().userId !== user.uid
       );
       
       if (partnerSession) {
@@ -364,19 +373,19 @@ function SessionBooking() {
         await Promise.all([
           updateDoc(doc(db, 'sessions', sessionId), {
             partnerId: partnerData.userId,
-            partnerName: partnerData.userName,
-            partnerPhoto: partnerData.userPhoto
+            partnerName: partnerData.userName || 'Study Partner',
+            partnerPhoto: partnerData.userPhoto || null
           }),
           updateDoc(doc(db, 'sessions', partnerSession.id), {
             partnerId: user.uid,
-            partnerName: user.displayName,
-            partnerPhoto: user.photoURL
+            partnerName: user.displayName || user.email?.split('@')[0] || 'User',
+            partnerPhoto: user.photoURL || null
           })
         ]);
         
         return {
           found: true,
-          partnerName: partnerData.userName
+          partnerName: partnerData.userName || 'Study Partner'
         };
       }
 
