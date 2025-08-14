@@ -31,6 +31,8 @@ function SessionBooking() {
   const [loading, setLoading] = useState(false);
   const [availableSlots, setAvailableSlots] = useState([]);
   const [partnersAvailable, setPartnersAvailable] = useState({});
+  const [bookedSlots, setBookedSlots] = useState(new Set());
+  const [loadingSlots, setLoadingSlots] = useState(false);
 
   // Enhanced goal suggestions categorized by exam/subject
   const goalCategories = {
@@ -94,6 +96,60 @@ function SessionBooking() {
     setAvailableSlots(slots);
   }, [selectedDate]);
 
+  const checkBookedSlots = useCallback(async () => {
+    setLoadingSlots(true);
+    try {
+      const startOfDay = new Date(selectedDate);
+      startOfDay.setHours(0, 0, 0, 0);
+      
+      const endOfDay = new Date(selectedDate);
+      endOfDay.setHours(23, 59, 59, 999);
+      
+      // Query for all scheduled sessions on the selected date
+      const q = query(
+        collection(db, 'sessions'),
+        where('startTime', '>=', startOfDay.toISOString()),
+        where('startTime', '<=', endOfDay.toISOString()),
+        where('status', 'in', ['scheduled', 'active'])
+      );
+      
+      const snapshot = await getDocs(q);
+      const booked = new Set();
+      const partners = {};
+      
+      snapshot.docs.forEach(docSnap => {
+        const sessionData = docSnap.data();
+        const sessionStart = new Date(sessionData.startTime);
+        const sessionEnd = addHours(sessionStart, sessionData.duration / 60);
+        
+        // Create time slots that are affected by this session
+        for (let time = new Date(sessionStart); time < sessionEnd; time = addHours(time, 0.5)) {
+          const timeKey = time.toISOString();
+          
+          // Mark as booked if this session has both user and partner
+          if (sessionData.partnerId) {
+            booked.add(timeKey);
+          } else if (sessionData.userId !== user.uid) {
+            // Available for partnering
+            if (!partners[sessionData.startTime]) {
+              partners[sessionData.startTime] = [];
+            }
+            partners[sessionData.startTime].push({
+              id: docSnap.id,
+              ...sessionData
+            });
+          }
+        }
+      });
+      
+      setBookedSlots(booked);
+      setPartnersAvailable(partners);
+    } catch (error) {
+      console.error('Error checking booked slots:', error);
+    }
+    setLoadingSlots(false);
+  }, [selectedDate, user.uid]);
+
   const checkPartnerAvailability = useCallback(async () => {
     if (!selectedTime) return;
 
@@ -129,19 +185,25 @@ function SessionBooking() {
         }
       });
       
-      setPartnersAvailable(availablePartners);
+      setPartnersAvailable(prev => ({ ...prev, ...availablePartners }));
     } catch (error) {
       console.error('Error checking partner availability:', error);
-      // Don't show error to user for this, it's background functionality
     }
   }, [selectedTime, duration, user.uid]);
 
   useEffect(() => {
     generateTimeSlots();
+  }, [selectedDate, generateTimeSlots]);
+
+  useEffect(() => {
+    checkBookedSlots();
+  }, [selectedDate, duration, checkBookedSlots]);
+
+  useEffect(() => {
     if (selectedTime) {
       checkPartnerAvailability();
     }
-  }, [selectedDate, selectedTime, duration, generateTimeSlots, checkPartnerAvailability]);
+  }, [selectedTime, duration, checkPartnerAvailability]);
 
   const formatDateLabel = (date) => {
     if (isToday(date)) return 'Today';
@@ -151,6 +213,12 @@ function SessionBooking() {
 
   const getTimeSlotClass = (slot) => {
     let className = 'time-slot';
+    
+    // Check if this slot is booked (has both user and partner)
+    if (bookedSlots.has(slot.value)) {
+      className += ' booked';
+      return className;
+    }
     
     // Popular times (peak study hours)
     if (slot.hour >= 9 && slot.hour <= 11) {
@@ -172,6 +240,10 @@ function SessionBooking() {
     }
     
     return className;
+  };
+
+  const isSlotBooked = (slotValue) => {
+    return bookedSlots.has(slotValue);
   };
 
   const handleQuickMatch = async () => {
@@ -210,6 +282,13 @@ function SessionBooking() {
           const sessionData = availableSession.data();
           const sessionId = availableSession.id;
           
+          // Check if the session is still available (no partner)
+          if (sessionData.partnerId) {
+            toast.error('Session was just taken by someone else. Try again!');
+            setLoading(false);
+            return;
+          }
+          
           // Create our session and pair immediately
           const newSessionData = {
             userId: user.uid,
@@ -246,7 +325,7 @@ function SessionBooking() {
       // No quick match found, create a session for others to join
       const nextSlot = availableSlots.find(slot => {
         const slotTime = new Date(slot.value);
-        return slotTime > addHours(now, 0.5); // At least 30 minutes from now
+        return slotTime > addHours(now, 0.5) && !bookedSlots.has(slot.value); // At least 30 minutes from now and not booked
       });
       
       if (nextSlot) {
@@ -289,6 +368,12 @@ function SessionBooking() {
     }
     if (!goal.trim()) {
       toast.error('Please enter your study goal');
+      return;
+    }
+
+    // Check if slot is booked
+    if (isSlotBooked(selectedTime)) {
+      toast.error('This time slot is already fully booked. Please select another time.');
       return;
     }
 
@@ -369,6 +454,11 @@ function SessionBooking() {
       if (partnerSession) {
         const partnerData = partnerSession.data();
         
+        // Double-check that partner session is still available
+        if (partnerData.partnerId) {
+          return { found: false };
+        }
+        
         // Update both sessions
         await Promise.all([
           updateDoc(doc(db, 'sessions', sessionId), {
@@ -398,6 +488,12 @@ function SessionBooking() {
 
   const handleGoalSuggestionClick = (suggestion) => {
     setGoal(suggestion);
+  };
+
+  const handleTimeSlotClick = (slotValue) => {
+    if (!isSlotBooked(slotValue)) {
+      setSelectedTime(slotValue);
+    }
   };
 
   return (
@@ -465,26 +561,41 @@ function SessionBooking() {
           {/* Time Selection */}
           <div className="form-group">
             <label><FiClock /> Select Time</label>
-            <div className="time-grid">
-              {availableSlots.map(slot => {
-                const partnersCount = partnersAvailable[slot.value]?.length || 0;
-                return (
-                  <button
-                    key={slot.value}
-                    className={getTimeSlotClass(slot)}
-                    onClick={() => setSelectedTime(slot.value)}
-                  >
-                    <span className="time-text">{slot.time}</span>
-                    {partnersCount > 0 && (
-                      <span className="partners-indicator">
-                        👥 {partnersCount}
-                      </span>
-                    )}
-                  </button>
-                );
-              })}
-            </div>
-            {availableSlots.length === 0 && (
+            {loadingSlots ? (
+              <div className="loading-container">
+                <div className="spinner"></div>
+                <p>Loading available times...</p>
+              </div>
+            ) : (
+              <div className="time-grid">
+                {availableSlots.map(slot => {
+                  const partnersCount = partnersAvailable[slot.value]?.length || 0;
+                  const isBooked = isSlotBooked(slot.value);
+                  
+                  return (
+                    <button
+                      key={slot.value}
+                      className={getTimeSlotClass(slot)}
+                      onClick={() => handleTimeSlotClick(slot.value)}
+                      disabled={isBooked}
+                      title={isBooked ? 'This time slot is fully booked' : ''}
+                    >
+                      <span className="time-text">{slot.time}</span>
+                      {isBooked ? (
+                        <span className="booked-indicator">
+                          🚫 Booked
+                        </span>
+                      ) : partnersCount > 0 && (
+                        <span className="partners-indicator">
+                          👥 {partnersCount}
+                        </span>
+                      )}
+                    </button>
+                  );
+                })}
+              </div>
+            )}
+            {availableSlots.length === 0 && !loadingSlots && (
               <p className="no-slots">No available slots for this date</p>
             )}
           </div>
@@ -606,9 +717,11 @@ function SessionBooking() {
           <button
             className="btn-primary btn-large"
             onClick={handleBookSession}
-            disabled={loading || !selectedTime || !goal.trim()}
+            disabled={loading || !selectedTime || !goal.trim() || isSlotBooked(selectedTime)}
           >
-            {loading ? 'Booking...' : 'Book Session'}
+            {loading ? 'Booking...' : 
+             isSlotBooked(selectedTime) ? 'Time Slot Booked' : 
+             'Book Session'}
           </button>
         </div>
       </div>
