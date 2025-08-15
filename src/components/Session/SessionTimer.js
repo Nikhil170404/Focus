@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
-import { FiPlay, FiPause, FiVolume2, FiVolumeX, FiRotateCcw } from 'react-icons/fi';
+import { FiPlay, FiPause, FiVolume2, FiVolumeX, FiRotateCcw, FiClock } from 'react-icons/fi';
 
 function SessionTimer({ 
   duration = 50, 
@@ -17,6 +17,7 @@ function SessionTimer({
   const [breakTimeLeft, setBreakTimeLeft] = useState(5 * 60); // 5 minute break
   const [sessionPhase, setSessionPhase] = useState('focus'); // 'focus', 'break', 'completed'
   const [motivationalMessage, setMotivationalMessage] = useState('');
+  const [isMinimized, setIsMinimized] = useState(isMobile && isOverlay);
   
   const intervalRef = useRef(null);
   const audioContextRef = useRef(null);
@@ -310,10 +311,10 @@ function SessionTimer({
     return 'Ready to Focus';
   };
 
-  const circumference = 2 * Math.PI * (isMobile ? 60 : 85);
+  const circleRadius = isMobile ? 40 : 60;
+  const circumference = 2 * Math.PI * circleRadius;
   const strokeDashoffset = circumference - (getCurrentProgress() / 100) * circumference;
-  const circleRadius = isMobile ? 60 : 85;
-  const svgSize = isMobile ? 140 : 200;
+  const svgSize = isMobile ? 100 : 140;
 
   // Break time modal
   if (isBreakTime && sessionPhase === 'break' && !isRunning) {
@@ -347,8 +348,33 @@ function SessionTimer({
     );
   }
 
+  // Mobile minimized view
+  if (isMobile && isOverlay && isMinimized) {
+    return (
+      <div className="timer-widget mobile minimized-timer" onClick={() => setIsMinimized(false)}>
+        <div className="minimized-content">
+          <FiClock size={16} />
+          <span className="mini-time">{getCurrentTime()}</span>
+          <span className="mini-status">{isRunning ? '⏸️' : '▶️'}</span>
+        </div>
+      </div>
+    );
+  }
+
   return (
-    <div className={`timer-widget ${isOverlay ? 'overlay' : ''} ${isMobile ? 'mobile' : ''}`}>
+    <div className={`timer-widget ${isOverlay ? 'overlay' : ''} ${isMobile ? 'mobile' : 'desktop'}`}>
+      {isMobile && isOverlay && (
+        <div className="mobile-timer-header">
+          <span className="timer-title">Focus Timer</span>
+          <button 
+            className="minimize-btn"
+            onClick={() => setIsMinimized(true)}
+          >
+            −
+          </button>
+        </div>
+      )}
+
       <div className="timer-circle">
         <svg className="timer-svg" viewBox={`0 0 ${svgSize} ${svgSize}`}>
           <circle
@@ -356,7 +382,7 @@ function SessionTimer({
             cx={svgSize / 2}
             cy={svgSize / 2}
             r={circleRadius}
-            strokeWidth={isMobile ? 6 : 10}
+            strokeWidth={isMobile ? 4 : 6}
             fill="none"
             stroke="#e5e7eb"
           />
@@ -365,7 +391,7 @@ function SessionTimer({
             cx={svgSize / 2}
             cy={svgSize / 2}
             r={circleRadius}
-            strokeWidth={isMobile ? 6 : 10}
+            strokeWidth={isMobile ? 4 : 6}
             fill="none"
             stroke={getTimerColor()}
             strokeLinecap="round"
@@ -396,7 +422,7 @@ function SessionTimer({
            `${duration} Min Session`}
         </h3>
         
-        {!isMobile && (
+        {!isMobile && !isOverlay && (
           <div className="motivational-message">
             {motivationalMessage}
           </div>
@@ -451,7 +477,7 @@ function SessionTimer({
           {soundEnabled ? <FiVolume2 /> : <FiVolumeX />}
         </button>
         
-        {sessionPhase === 'focus' && timeLeft > 0 && !isMobile && (
+        {sessionPhase === 'focus' && timeLeft > 0 && !isMobile && !isOverlay && (
           <div className="extend-controls">
             <button 
               onClick={() => extendSession(5)}
@@ -471,7 +497,7 @@ function SessionTimer({
         )}
       </div>
       
-      {sessionPhase === 'focus' && !isMobile && (
+      {sessionPhase === 'focus' && !isMobile && !isOverlay && (
         <div className="timer-tips">
           <div className="tip-rotation">
             <div className="tip active">

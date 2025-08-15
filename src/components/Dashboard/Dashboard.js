@@ -66,6 +66,113 @@ function Dashboard() {
     return () => clearTimeout(loadingTimeout);
   }, [loading]);
 
+  // Calculate streak helper function - MOVED UP
+  const calculateStreak = useCallback((sessions) => {
+    if (!sessions || sessions.length === 0) return 0;
+    
+    try {
+      // Sort sessions by date
+      const sortedSessions = [...sessions].sort((a, b) => {
+        const dateA = a.endedAt?.toDate?.() || new Date(a.endedAt || 0);
+        const dateB = b.endedAt?.toDate?.() || new Date(b.endedAt || 0);
+        return dateB - dateA;
+      });
+      
+      // Group by date
+      const sessionDates = new Set();
+      sortedSessions.forEach(session => {
+        try {
+          const date = session.endedAt?.toDate?.() || new Date(session.endedAt);
+          const dateStr = startOfDay(date).toISOString();
+          sessionDates.add(dateStr);
+        } catch {
+          // Skip invalid dates
+        }
+      });
+      
+      const uniqueDates = Array.from(sessionDates).sort((a, b) => new Date(b) - new Date(a));
+      if (uniqueDates.length === 0) return 0;
+      
+      let streak = 0;
+      const today = startOfDay(new Date());
+      const yesterday = new Date(today);
+      yesterday.setDate(yesterday.getDate() - 1);
+      
+      // Check if streak is active
+      const latestDate = new Date(uniqueDates[0]);
+      if (differenceInDays(today, latestDate) > 1) {
+        return 0; // Streak broken
+      }
+      
+      // Count consecutive days
+      let currentDate = latestDate;
+      for (let i = 0; i < uniqueDates.length; i++) {
+        const sessionDate = new Date(uniqueDates[i]);
+        const dayDiff = differenceInDays(currentDate, sessionDate);
+        
+        if (dayDiff <= 1) {
+          streak++;
+          currentDate = sessionDate;
+        } else {
+          break;
+        }
+      }
+      
+      return streak;
+    } catch (error) {
+      console.error('Error calculating streak:', error);
+      return 0;
+    }
+  }, []);
+
+  // Calculate stats helper function - MOVED UP
+  const calculateStats = useCallback((sessions) => {
+    const totalSessions = sessions.length;
+    const totalMinutes = sessions.reduce((acc, session) => {
+      return acc + (session.actualDuration || session.duration || 0);
+    }, 0);
+
+    // Calculate streak
+    const streak = calculateStreak(sessions);
+    
+    // This week's sessions
+    const weekStart = startOfDay(new Date());
+    weekStart.setDate(weekStart.getDate() - weekStart.getDay());
+    const thisWeek = sessions.filter(session => {
+      try {
+        const sessionDate = session.endedAt?.toDate?.() || new Date(session.endedAt);
+        return sessionDate >= weekStart;
+      } catch {
+        return false;
+      }
+    }).length;
+
+    // This month's sessions
+    const monthStart = new Date();
+    monthStart.setDate(1);
+    monthStart.setHours(0, 0, 0, 0);
+    const thisMonth = sessions.filter(session => {
+      try {
+        const sessionDate = session.endedAt?.toDate?.() || new Date(session.endedAt);
+        return sessionDate >= monthStart;
+      } catch {
+        return false;
+      }
+    }).length;
+
+    // Calculate level
+    const level = Math.floor(totalSessions / 10) + 1;
+
+    return {
+      totalSessions,
+      totalMinutes,
+      streak,
+      thisWeek,
+      thisMonth,
+      level
+    };
+  }, [calculateStreak]);
+
   // Ensure user document exists
   const ensureUserDocument = useCallback(async () => {
     if (!user) return;
@@ -238,112 +345,7 @@ function Dashboard() {
       setLoading(false);
       setRefreshing(false);
     }
-  }, [user, ensureUserDocument]);
-
-  const calculateStats = (sessions) => {
-    const totalSessions = sessions.length;
-    const totalMinutes = sessions.reduce((acc, session) => {
-      return acc + (session.actualDuration || session.duration || 0);
-    }, 0);
-
-    // Calculate streak
-    const streak = calculateStreak(sessions);
-    
-    // This week's sessions
-    const weekStart = startOfDay(new Date());
-    weekStart.setDate(weekStart.getDate() - weekStart.getDay());
-    const thisWeek = sessions.filter(session => {
-      try {
-        const sessionDate = session.endedAt?.toDate?.() || new Date(session.endedAt);
-        return sessionDate >= weekStart;
-      } catch {
-        return false;
-      }
-    }).length;
-
-    // This month's sessions
-    const monthStart = new Date();
-    monthStart.setDate(1);
-    monthStart.setHours(0, 0, 0, 0);
-    const thisMonth = sessions.filter(session => {
-      try {
-        const sessionDate = session.endedAt?.toDate?.() || new Date(session.endedAt);
-        return sessionDate >= monthStart;
-      } catch {
-        return false;
-      }
-    }).length;
-
-    // Calculate level
-    const level = Math.floor(totalSessions / 10) + 1;
-
-    return {
-      totalSessions,
-      totalMinutes,
-      streak,
-      thisWeek,
-      thisMonth,
-      level
-    };
-  };
-
-  const calculateStreak = (sessions) => {
-    if (!sessions || sessions.length === 0) return 0;
-    
-    try {
-      // Sort sessions by date
-      const sortedSessions = [...sessions].sort((a, b) => {
-        const dateA = a.endedAt?.toDate?.() || new Date(a.endedAt || 0);
-        const dateB = b.endedAt?.toDate?.() || new Date(b.endedAt || 0);
-        return dateB - dateA;
-      });
-      
-      // Group by date
-      const sessionDates = new Set();
-      sortedSessions.forEach(session => {
-        try {
-          const date = session.endedAt?.toDate?.() || new Date(session.endedAt);
-          const dateStr = startOfDay(date).toISOString();
-          sessionDates.add(dateStr);
-        } catch {
-          // Skip invalid dates
-        }
-      });
-      
-      const uniqueDates = Array.from(sessionDates).sort((a, b) => new Date(b) - new Date(a));
-      if (uniqueDates.length === 0) return 0;
-      
-      let streak = 0;
-      const today = startOfDay(new Date());
-      const yesterday = new Date(today);
-      yesterday.setDate(yesterday.getDate() - 1);
-      
-      // Check if streak is active
-      const latestDate = new Date(uniqueDates[0]);
-      if (differenceInDays(today, latestDate) > 1) {
-        return 0; // Streak broken
-      }
-      
-      // Count consecutive days
-      let currentDate = latestDate;
-      for (let i = 0; i < uniqueDates.length; i++) {
-        const sessionDate = new Date(uniqueDates[i]);
-        const dayDiff = differenceInDays(currentDate, sessionDate);
-        
-        if (dayDiff <= 1) {
-          streak++;
-          currentDate = sessionDate;
-        } else {
-          break;
-        }
-      }
-      
-      return streak;
-    } catch (error) {
-      console.error('Error calculating streak:', error);
-      return 0;
-    }
-  };
+  }, [user, ensureUserDocument, calculateStats]);
 
   const updateUserStats = async (calculatedStats) => {
     if (!user) return;

@@ -11,12 +11,13 @@ import {
   orderBy,
   runTransaction,
   doc,
-  Timestamp
+  Timestamp,
+  addDoc
 } from 'firebase/firestore';
 import { db } from '../../config/firebase';
 import { useAuth } from '../../hooks/useAuth';
 import { addDays, addHours, format, isToday, isTomorrow } from 'date-fns';
-import { FiCalendar, FiClock, FiTarget, FiArrowLeft, FiUsers, FiZap } from 'react-icons/fi';
+import { FiCalendar, FiClock, FiTarget, FiArrowLeft, FiUsers, FiZap, FiEye, FiUserPlus } from 'react-icons/fi';
 import toast from 'react-hot-toast';
 
 function SessionBooking() {
@@ -30,9 +31,10 @@ function SessionBooking() {
   const [goal, setGoal] = useState('');
   const [loading, setLoading] = useState(false);
   const [availableSlots, setAvailableSlots] = useState([]);
-  const [partnersAvailable, setPartnersAvailable] = useState({});
-  const [bookedSlots, setBookedSlots] = useState(new Set());
+  const [availableSessions, setAvailableSessions] = useState([]);
   const [loadingSlots, setLoadingSlots] = useState(false);
+  const [loadingSessions, setLoadingSessions] = useState(false);
+  const [activeTab, setActiveTab] = useState('create'); // 'create' or 'join'
 
   // Enhanced goal suggestions categorized by exam/subject
   const goalCategories = {
@@ -72,18 +74,7 @@ function SessionBooking() {
 
   const [selectedCategory, setSelectedCategory] = useState('General');
 
-  // Generate time slot ID for consistent matching
-  const generateTimeSlotId = (startTime, duration) => {
-    const date = new Date(startTime);
-    const year = date.getFullYear();
-    const month = String(date.getMonth() + 1).padStart(2, '0');
-    const day = String(date.getDate()).padStart(2, '0');
-    const hour = String(date.getHours()).padStart(2, '0');
-    const minute = String(date.getMinutes()).padStart(2, '0');
-    
-    return `${year}-${month}-${day}T${hour}:${minute}-${duration}min`;
-  };
-
+  // Generate time slots for the day
   const generateTimeSlots = useCallback(() => {
     const slots = [];
     const start = new Date(selectedDate);
@@ -96,12 +87,12 @@ function SessionBooking() {
       const slotTime = addHours(start, i * 0.5);
       
       // Only show future slots if selected date is today
-      if (!isSelectedToday || slotTime > now) {
+      if (!isSelectedToday || slotTime > addHours(now, 0.5)) {
         slots.push({
           time: format(slotTime, 'h:mm a'),
           value: slotTime.toISOString(),
           hour: slotTime.getHours(),
-          slotId: generateTimeSlotId(slotTime, duration)
+          slotId: `${format(slotTime, 'yyyy-MM-dd-HH-mm')}-${duration}min`
         });
       }
     }
@@ -109,79 +100,94 @@ function SessionBooking() {
     setAvailableSlots(slots);
   }, [selectedDate, duration]);
 
-  const checkBookedSlots = useCallback(async () => {
-    setLoadingSlots(true);
+  // Fetch available sessions that users can join
+  const fetchAvailableSessions = useCallback(async () => {
+    if (!user) return;
     
-    // Set timeout to prevent infinite loading
-    const timeout = setTimeout(() => {
-      setLoadingSlots(false);
-      setBookedSlots(new Set());
-      setPartnersAvailable({});
-    }, 3000);
-
+    setLoadingSessions(true);
     try {
-      const startOfDay = new Date(selectedDate);
-      startOfDay.setHours(0, 0, 0, 0);
+      const now = new Date();
+      const dayStart = new Date(selectedDate);
+      dayStart.setHours(0, 0, 0, 0);
+      const dayEnd = new Date(selectedDate);
+      dayEnd.setHours(23, 59, 59, 999);
       
-      const endOfDayTime = new Date(selectedDate);
-      endOfDayTime.setHours(23, 59, 59, 999);
-      
-      // Query time slots for this date
-      const dayString = format(selectedDate, 'yyyy-MM-dd');
-      const timeSlotsQuery = query(
-        collection(db, 'timeSlots'),
-        where('date', '==', dayString),
+      // Query for sessions created by others that need partners
+      const q = query(
+        collection(db, 'sessions'),
+        where('status', '==', 'scheduled'),
+        where('partnerId', '==', null),
+        where('userId', '!=', user.uid),
+        where('startTime', '>=', dayStart.toISOString()),
+        where('startTime', '<=', dayEnd.toISOString()),
         where('duration', '==', duration),
-        limit(50)
+        orderBy('startTime', 'asc'),
+        limit(20)
       );
       
-      const snapshot = await getDocs(timeSlotsQuery);
-      const booked = new Set();
-      const partners = {};
+      const snapshot = await getDocs(q);
+      const sessions = snapshot.docs
+        .map(doc => ({ id: doc.id, ...doc.data() }))
+        .filter(session => {
+          const sessionTime = new Date(session.startTime);
+          return sessionTime > addHours(now, 0.25); // At least 15 minutes in future
+        });
       
-      snapshot.docs.forEach(docSnap => {
-        const slotData = docSnap.data();
-        const slotTime = slotData.startTime;
-        
-        if (slotData.participants && slotData.participants.length >= 2) {
-          // Slot is full
-          booked.add(slotTime);
-        } else if (slotData.participants && slotData.participants.length === 1) {
-          // One person waiting for partner
-          const waitingUser = slotData.participants[0];
-          if (waitingUser.userId !== user.uid) {
-            if (!partners[slotTime]) {
-              partners[slotTime] = [];
-            }
-            partners[slotTime].push({
-              id: docSnap.id,
-              sessionId: slotData.sessionId,
-              ...waitingUser
-            });
-          }
-        }
-      });
-      
-      clearTimeout(timeout);
-      setBookedSlots(booked);
-      setPartnersAvailable(partners);
+      setAvailableSessions(sessions);
     } catch (error) {
-      console.error('Error checking booked slots:', error);
-      clearTimeout(timeout);
-      setBookedSlots(new Set());
-      setPartnersAvailable({});
+      console.error('Error fetching available sessions:', error);
+      setAvailableSessions([]);
     } finally {
-      setLoadingSlots(false);
+      setLoadingSessions(false);
     }
-  }, [selectedDate, duration, user.uid]);
+  }, [selectedDate, duration, user]);
 
   useEffect(() => {
     generateTimeSlots();
   }, [selectedDate, generateTimeSlots]);
 
   useEffect(() => {
-    checkBookedSlots();
-  }, [selectedDate, duration, checkBookedSlots]);
+    if (activeTab === 'join') {
+      fetchAvailableSessions();
+    }
+  }, [activeTab, selectedDate, duration, fetchAvailableSessions]);
+
+  // Set up real-time listener for available sessions
+  useEffect(() => {
+    if (activeTab !== 'join' || !user) return;
+
+    const now = new Date();
+    const dayStart = new Date(selectedDate);
+    dayStart.setHours(0, 0, 0, 0);
+    const dayEnd = new Date(selectedDate);
+    dayEnd.setHours(23, 59, 59, 999);
+
+    const q = query(
+      collection(db, 'sessions'),
+      where('status', '==', 'scheduled'),
+      where('partnerId', '==', null),
+      where('userId', '!=', user.uid),
+      where('startTime', '>=', dayStart.toISOString()),
+      where('startTime', '<=', dayEnd.toISOString()),
+      where('duration', '==', duration),
+      orderBy('startTime', 'asc'),
+      limit(20)
+    );
+
+    const unsubscribe = onSnapshot(q, (snapshot) => {
+      const sessions = snapshot.docs
+        .map(doc => ({ id: doc.id, ...doc.data() }))
+        .filter(session => {
+          const sessionTime = new Date(session.startTime);
+          return sessionTime > addHours(now, 0.25);
+        });
+      
+      setAvailableSessions(sessions);
+      setLoadingSessions(false);
+    });
+
+    return () => unsubscribe();
+  }, [activeTab, selectedDate, duration, user]);
 
   const formatDateLabel = (date) => {
     if (isToday(date)) return 'Today';
@@ -189,158 +195,83 @@ function SessionBooking() {
     return format(date, 'EEE, MMM d');
   };
 
-  const getTimeSlotClass = (slot) => {
-    let className = 'time-slot';
-    
-    // Check if this slot is fully booked
-    if (bookedSlots.has(slot.value)) {
-      className += ' booked';
-      return className;
-    }
-    
-    // Popular times (peak study hours)
-    if (slot.hour >= 9 && slot.hour <= 11) {
-      className += ' popular morning';
-    } else if (slot.hour >= 14 && slot.hour <= 17) {
-      className += ' popular afternoon';
-    } else if (slot.hour >= 19 && slot.hour <= 22) {
-      className += ' popular evening';
-    }
-    
-    // Check if partners are available
-    const partnersCount = partnersAvailable[slot.value]?.length || 0;
-    if (partnersCount > 0) {
-      className += ' has-partners';
-    }
-    
-    if (selectedTime === slot.value) {
-      className += ' active';
-    }
-    
-    return className;
-  };
-
-  const isSlotBooked = (slotValue) => {
-    return bookedSlots.has(slotValue);
-  };
-
-  // Atomic booking function using Firestore transactions
-  const bookSessionAtomic = async (startTime, sessionData) => {
+  // Atomic session creation using Firestore transactions
+  const createSession = async (sessionData) => {
     try {
-      const slotId = generateTimeSlotId(startTime, duration);
-      const timeSlotRef = doc(db, 'timeSlots', slotId);
-      
-      console.log('Attempting atomic booking for slot:', slotId);
+      const sessionRef = doc(collection(db, 'sessions'));
       
       const result = await runTransaction(db, async (transaction) => {
-        // Read the time slot document
-        const timeSlotDoc = await transaction.get(timeSlotRef);
+        // Create the session
+        const newSessionData = {
+          ...sessionData,
+          id: sessionRef.id,
+          createdAt: serverTimestamp(),
+          status: 'scheduled',
+          partnerId: null,
+          partnerName: null,
+          partnerPhoto: null,
+          participants: [user.uid],
+          maxParticipants: 2
+        };
         
-        if (!timeSlotDoc.exists()) {
-          // Create new time slot with first participant
-          console.log('Creating new time slot');
-          const sessionRef = doc(collection(db, 'sessions'));
-          
-          // Create session data
-          const newSessionData = {
-            ...sessionData,
-            createdAt: serverTimestamp(),
-            status: 'scheduled',
-            partnerId: null,
-            partnerName: null,
-            partnerPhoto: null
-          };
-          
-          // Create session
-          transaction.set(sessionRef, newSessionData);
-          
-          // Use Timestamp.now() instead of serverTimestamp() inside arrays
-          const currentTime = Timestamp.now();
-          
-          // Create time slot
-          transaction.set(timeSlotRef, {
-            slotId: slotId,
-            date: format(new Date(startTime), 'yyyy-MM-dd'),
-            startTime: startTime,
-            duration: duration,
-            maxParticipants: 2,
-            sessionId: sessionRef.id,
-            participants: [{
-              userId: user.uid,
-              userName: user.displayName || user.email?.split('@')[0] || 'User',
-              userPhoto: user.photoURL || null,
-              joinedAt: currentTime
-            }],
-            createdAt: serverTimestamp()
-          });
-          
-          return {
-            success: true,
-            type: 'created',
-            sessionId: sessionRef.id,
-            partnerName: null
-          };
-          
-        } else {
-          // Time slot exists, try to join as partner
-          const slotData = timeSlotDoc.data();
-          
-          if (!slotData.participants || slotData.participants.length === 0) {
-            throw new Error('Invalid time slot data');
-          }
-          
-          if (slotData.participants.length >= 2) {
-            throw new Error('Time slot is already full');
-          }
-          
-          // Check if user is already in this slot
-          const userAlreadyBooked = slotData.participants.find(p => p.userId === user.uid);
-          if (userAlreadyBooked) {
-            throw new Error('You are already booked for this time slot');
-          }
-          
-          console.log('Joining existing time slot as partner');
-          const waitingParticipant = slotData.participants[0];
-          const sessionRef = doc(db, 'sessions', slotData.sessionId);
-          
-          // Update session with partner info
-          transaction.update(sessionRef, {
-            partnerId: user.uid,
-            partnerName: user.displayName || user.email?.split('@')[0] || 'User',
-            partnerPhoto: user.photoURL || null,
-            updatedAt: serverTimestamp()
-          });
-          
-          // Use Timestamp.now() instead of serverTimestamp() inside arrays
-          const currentTime = Timestamp.now();
-          
-          // Update time slot with second participant
-          transaction.update(timeSlotRef, {
-            participants: [
-              ...slotData.participants,
-              {
-                userId: user.uid,
-                userName: user.displayName || user.email?.split('@')[0] || 'User',
-                userPhoto: user.photoURL || null,
-                joinedAt: currentTime
-              }
-            ],
-            updatedAt: serverTimestamp()
-          });
-          
-          return {
-            success: true,
-            type: 'joined',
-            sessionId: slotData.sessionId,
-            partnerName: waitingParticipant.userName || 'Study Partner'
-          };
-        }
+        transaction.set(sessionRef, newSessionData);
+        
+        return {
+          success: true,
+          sessionId: sessionRef.id,
+          type: 'created'
+        };
       });
       
       return result;
-      
     } catch (error) {
       console.error('Transaction failed:', error);
+      throw error;
+    }
+  };
+
+  // Join an existing session atomically
+  const joinExistingSession = async (existingSessionId) => {
+    try {
+      const sessionRef = doc(db, 'sessions', existingSessionId);
+      
+      const result = await runTransaction(db, async (transaction) => {
+        const sessionDoc = await transaction.get(sessionRef);
+        
+        if (!sessionDoc.exists()) {
+          throw new Error('Session no longer exists');
+        }
+        
+        const sessionData = sessionDoc.data();
+        
+        if (sessionData.partnerId) {
+          throw new Error('Session already has a partner');
+        }
+        
+        if (sessionData.userId === user.uid) {
+          throw new Error('Cannot join your own session');
+        }
+        
+        // Update session with partner info
+        transaction.update(sessionRef, {
+          partnerId: user.uid,
+          partnerName: user.displayName || user.email?.split('@')[0] || 'Study Partner',
+          partnerPhoto: user.photoURL || null,
+          participants: [sessionData.userId, user.uid],
+          updatedAt: serverTimestamp()
+        });
+        
+        return {
+          success: true,
+          sessionId: existingSessionId,
+          type: 'joined',
+          creatorName: sessionData.userName || 'Study Partner'
+        };
+      });
+      
+      return result;
+    } catch (error) {
+      console.error('Join session failed:', error);
       throw error;
     }
   };
@@ -354,60 +285,45 @@ function SessionBooking() {
     setLoading(true);
     
     try {
-      // Find the next available session with a partner waiting
+      // Look for any available session with a partner waiting
       const now = new Date();
-      
-      // Look for time slots with one participant waiting
-      const dayString = format(now, 'yyyy-MM-dd');
       const q = query(
-        collection(db, 'timeSlots'),
-        where('date', '==', dayString),
+        collection(db, 'sessions'),
+        where('status', '==', 'scheduled'),
+        where('partnerId', '==', null),
+        where('userId', '!=', user.uid),
         where('duration', '==', duration),
         orderBy('startTime', 'asc'),
-        limit(10)
+        limit(5)
       );
       
       const snapshot = await getDocs(q);
       
       for (const docSnap of snapshot.docs) {
-        const slotData = docSnap.data();
-        const slotTime = new Date(slotData.startTime);
+        const sessionData = docSnap.data();
+        const sessionTime = new Date(sessionData.startTime);
         
-        // Check if slot is in the future and has exactly one participant
-        if (slotTime > now && 
-            slotData.participants && 
-            slotData.participants.length === 1 &&
-            slotData.participants[0].userId !== user.uid) {
-          
+        // Check if session is in the future (at least 15 minutes)
+        if (sessionTime > addHours(now, 0.25)) {
           try {
-            const sessionData = {
-              userId: user.uid,
-              userName: user.displayName || user.email?.split('@')[0] || 'User',
-              userPhoto: user.photoURL || null,
-              startTime: slotData.startTime,
-              endTime: addHours(new Date(slotData.startTime), duration / 60).toISOString(),
-              duration: duration,
-              goal: goal.trim()
-            };
+            const result = await joinExistingSession(docSnap.id);
             
-            const result = await bookSessionAtomic(slotData.startTime, sessionData);
-            
-            if (result.success && result.type === 'joined') {
-              toast.success(`Quick match found! Paired with ${result.partnerName} 🎉`);
+            if (result.success) {
+              toast.success(`Quick match found! Joined ${result.creatorName}'s session! 🎉`);
               navigate(`/session/${result.sessionId}`);
               return;
             }
           } catch (error) {
-            console.log('Failed to join slot, trying next one:', error.message);
+            console.log('Failed to join session, trying next one:', error.message);
             continue;
           }
         }
       }
       
-      // No quick match found, create a session for the next available slot
+      // No quick match found, create a new session for the next available slot
       const nextSlot = availableSlots.find(slot => {
         const slotTime = new Date(slot.value);
-        return slotTime > addHours(now, 0.5) && !bookedSlots.has(slot.value);
+        return slotTime > addHours(now, 0.5);
       });
       
       if (nextSlot) {
@@ -421,14 +337,14 @@ function SessionBooking() {
           goal: goal.trim()
         };
 
-        const result = await bookSessionAtomic(nextSlot.value, sessionData);
+        const result = await createSession(sessionData);
         
         if (result.success) {
           toast.success('Session created! Waiting for a study partner to join 📚');
           navigate(`/session/${result.sessionId}`);
         }
       } else {
-        toast.error('No available slots for quick match today');
+        toast.error('No available time slots for quick match');
       }
       
     } catch (error) {
@@ -439,19 +355,13 @@ function SessionBooking() {
     setLoading(false);
   };
 
-  const handleBookSession = async () => {
+  const handleCreateSession = async () => {
     if (!selectedTime) {
       toast.error('Please select a time');
       return;
     }
     if (!goal.trim()) {
       toast.error('Please enter your study goal');
-      return;
-    }
-
-    // Check if slot is fully booked
-    if (isSlotBooked(selectedTime)) {
-      toast.error('This time slot is already fully booked. Please select another time.');
       return;
     }
 
@@ -468,43 +378,45 @@ function SessionBooking() {
         goal: goal.trim()
       };
 
-      const result = await bookSessionAtomic(selectedTime, sessionData);
+      const result = await createSession(sessionData);
       
       if (result.success) {
-        if (result.type === 'joined') {
-          toast.success(`Session booked with ${result.partnerName}! 🎯`);
-        } else {
-          toast.success('Session booked! Looking for a study partner... 📚');
-          
-          // Set up real-time listener for partner matching
-          const unsubscribe = onSnapshot(doc(db, 'sessions', result.sessionId), (docSnap) => {
-            if (docSnap.exists()) {
-              const data = docSnap.data();
-              if (data.partnerId && data.partnerName && data.partnerId !== user.uid) {
-                toast.success(`Partner found: ${data.partnerName}! 🤝`);
-                unsubscribe();
-              }
-            }
-          });
-          
-          // Stop listening after 5 minutes
-          setTimeout(() => {
-            unsubscribe();
-          }, 300000);
-        }
-        
+        toast.success('Session created! Others can now join your session 📚');
         navigate(`/session/${result.sessionId}`);
       }
     } catch (error) {
-      console.error('Error booking session:', error);
+      console.error('Error creating session:', error);
+      toast.error('Failed to create session. Please try again.');
+    }
+    
+    setLoading(false);
+  };
+
+  const handleJoinSession = async (sessionId, creatorName) => {
+    if (!goal.trim()) {
+      toast.error('Please enter your study goal first');
+      return;
+    }
+
+    setLoading(true);
+    
+    try {
+      const result = await joinExistingSession(sessionId);
       
-      if (error.message === 'Time slot is already full') {
-        toast.error('This time slot just got filled by someone else. Please select another time.');
-        checkBookedSlots(); // Refresh slot availability
-      } else if (error.message === 'You are already booked for this time slot') {
-        toast.error('You already have a session at this time.');
+      if (result.success) {
+        toast.success(`Joined ${creatorName}'s session! 🤝`);
+        navigate(`/session/${result.sessionId}`);
+      }
+    } catch (error) {
+      console.error('Error joining session:', error);
+      if (error.message === 'Session already has a partner') {
+        toast.error('This session is now full. Please try another one.');
+        fetchAvailableSessions(); // Refresh the list
+      } else if (error.message === 'Session no longer exists') {
+        toast.error('This session is no longer available.');
+        fetchAvailableSessions(); // Refresh the list
       } else {
-        toast.error('Failed to book session. Please try again.');
+        toast.error('Failed to join session. Please try again.');
       }
     }
     
@@ -513,12 +425,6 @@ function SessionBooking() {
 
   const handleGoalSuggestionClick = (suggestion) => {
     setGoal(suggestion);
-  };
-
-  const handleTimeSlotClick = (slotValue) => {
-    if (!isSlotBooked(slotValue)) {
-      setSelectedTime(slotValue);
-    }
   };
 
   return (
@@ -533,230 +439,316 @@ function SessionBooking() {
             <FiArrowLeft />
           </button>
           <div className="header-content">
-            <h2 className="booking-title">Book Study Session</h2>
-            <p className="booking-subtitle">Find a study partner and stay focused together</p>
-          </div>
-        </div>
-        
-        {/* Quick Match Option */}
-        <div className="quick-match-section">
-          <div className="quick-match-card">
-            <div className="quick-match-icon">
-              <FiZap />
-            </div>
-            <div className="quick-match-content">
-              <h3>Quick Partner Match</h3>
-              <p>Join an available study partner right now or create a session for others to join</p>
-            </div>
-            <button 
-              className="btn-quick-match"
-              onClick={handleQuickMatch}
-              disabled={loading || !goal.trim()}
-            >
-              <FiUsers /> Find Partner
-            </button>
+            <h2 className="booking-title">Study Sessions</h2>
+            <p className="booking-subtitle">Create a session or join an existing one</p>
           </div>
         </div>
 
-        <div className="divider">
-          <span>OR SCHEDULE A SPECIFIC TIME</span>
-        </div>
-        
-        <div className="booking-form">
-          {/* Date Selection */}
-          <div className="form-group">
-            <label><FiCalendar /> Select Date</label>
-            <div className="date-picker">
-              {[0, 1, 2, 3, 4, 5, 6].map(days => {
-                const date = addDays(new Date(), days);
-                return (
-                  <button
-                    key={days}
-                    className={`date-btn ${selectedDate.toDateString() === date.toDateString() ? 'active' : ''}`}
-                    onClick={() => setSelectedDate(date)}
-                  >
-                    <div className="date-day">{formatDateLabel(date)}</div>
-                    <div className="date-num">{format(date, 'd')}</div>
-                  </button>
-                );
-              })}
-            </div>
-          </div>
-
-          {/* Time Selection */}
-          <div className="form-group">
-            <label><FiClock /> Select Time</label>
-            {loadingSlots ? (
-              <div className="loading-container">
-                <div className="spinner"></div>
-                <p>Loading available times...</p>
-              </div>
-            ) : (
-              <div className="time-grid">
-                {availableSlots.map(slot => {
-                  const partnersCount = partnersAvailable[slot.value]?.length || 0;
-                  const isFullyBooked = isSlotBooked(slot.value);
-                  
-                  return (
-                    <button
-                      key={slot.value}
-                      className={getTimeSlotClass(slot)}
-                      onClick={() => handleTimeSlotClick(slot.value)}
-                      disabled={isFullyBooked}
-                      title={isFullyBooked ? 'This time slot is fully booked' : ''}
-                    >
-                      <span className="time-text">{slot.time}</span>
-                      {isFullyBooked ? (
-                        <span className="booked-indicator">
-                          🚫 Full
-                        </span>
-                      ) : partnersCount > 0 ? (
-                        <span className="partners-indicator">
-                          👥 {partnersCount} waiting
-                        </span>
-                      ) : (
-                        <span className="available-indicator">
-                          ✨ Available
-                        </span>
-                      )}
-                    </button>
-                  );
-                })}
-              </div>
-            )}
-            {availableSlots.length === 0 && !loadingSlots && (
-              <p className="no-slots">No available slots for this date</p>
-            )}
-          </div>
-
-          {/* Duration */}
-          <div className="form-group">
-            <label>Session Duration</label>
-            <div className="duration-options">
-              {[
-                { value: 25, label: '25 min', desc: 'Quick sprint', icon: '⚡' },
-                { value: 50, label: '50 min', desc: 'Standard session', icon: '📚' },
-                { value: 90, label: '90 min', desc: 'Deep focus', icon: '🎯' }
-              ].map(option => (
-                <button
-                  key={option.value}
-                  className={`duration-btn ${duration === option.value ? 'active' : ''}`}
-                  onClick={() => setDuration(option.value)}
-                >
-                  <div className="duration-icon">{option.icon}</div>
-                  <div className="duration-content">
-                    <div className="duration-label">{option.label}</div>
-                    <div className="duration-desc">{option.desc}</div>
-                  </div>
-                </button>
-              ))}
-            </div>
-          </div>
-
-          {/* Goal Category */}
-          <div className="form-group">
-            <label>Study Category</label>
-            <div className="category-tabs">
-              {Object.keys(goalCategories).map(category => (
-                <button
-                  key={category}
-                  className={`category-tab ${selectedCategory === category ? 'active' : ''}`}
-                  onClick={() => setSelectedCategory(category)}
-                >
-                  {category}
-                </button>
-              ))}
-            </div>
-          </div>
-
-          {/* Goal */}
-          <div className="form-group">
-            <label><FiTarget /> Study Goal</label>
-            <textarea
-              className="goal-input"
-              placeholder="What will you work on during this session?"
-              value={goal}
-              onChange={(e) => setGoal(e.target.value)}
-              maxLength={200}
-              rows={3}
-            />
-            
-            <div className="goal-suggestions">
-              <h4>Quick suggestions for {selectedCategory}:</h4>
-              <div className="suggestions-grid">
-                {goalCategories[selectedCategory].map((suggestion, i) => (
-                  <button
-                    key={i}
-                    className="suggestion-btn"
-                    onClick={() => handleGoalSuggestionClick(suggestion)}
-                  >
-                    {suggestion}
-                  </button>
-                ))}
-              </div>
-            </div>
-            
-            <div className="char-counter">
-              <span>{goal.length}/200</span>
-            </div>
-          </div>
-
-          {/* Session Summary */}
-          {selectedTime && goal && (
-            <div className="session-summary">
-              <h4>Session Summary</h4>
-              <div className="summary-grid">
-                <div className="summary-item">
-                  <FiCalendar className="summary-icon" />
-                  <div className="summary-content">
-                    <span className="summary-label">Date & Time</span>
-                    <span className="summary-value">
-                      {format(new Date(selectedTime), 'MMM d, h:mm a')}
-                    </span>
-                  </div>
-                </div>
-                <div className="summary-item">
-                  <FiClock className="summary-icon" />
-                  <div className="summary-content">
-                    <span className="summary-label">Duration</span>
-                    <span className="summary-value">{duration} minutes</span>
-                  </div>
-                </div>
-                <div className="summary-item">
-                  <FiTarget className="summary-icon" />
-                  <div className="summary-content">
-                    <span className="summary-label">Goal</span>
-                    <span className="summary-value">{goal}</span>
-                  </div>
-                </div>
-                <div className="summary-item">
-                  <FiUsers className="summary-icon" />
-                  <div className="summary-content">
-                    <span className="summary-label">Partner Status</span>
-                    <span className="summary-value">
-                      {partnersAvailable[selectedTime]?.length > 0 
-                        ? `${partnersAvailable[selectedTime].length} partner(s) waiting`
-                        : 'Will wait for partner'
-                      }
-                    </span>
-                  </div>
-                </div>
-              </div>
-            </div>
-          )}
-
-          {/* Book Button */}
-          <button
-            className="btn-primary btn-large"
-            onClick={handleBookSession}
-            disabled={loading || !selectedTime || !goal.trim() || isSlotBooked(selectedTime)}
+        {/* Tab Switcher */}
+        <div className="tab-switcher">
+          <button 
+            className={`tab-button ${activeTab === 'create' ? 'active' : ''}`}
+            onClick={() => setActiveTab('create')}
           >
-            {loading ? 'Booking...' : 
-             isSlotBooked(selectedTime) ? 'Time Slot Full' : 
-             partnersAvailable[selectedTime]?.length > 0 ? 'Join Study Partner' :
-             'Create Session & Wait for Partner'}
+            <FiUserPlus /> Create Session
+          </button>
+          <button 
+            className={`tab-button ${activeTab === 'join' ? 'active' : ''}`}
+            onClick={() => setActiveTab('join')}
+          >
+            <FiEye /> Join Available Sessions
           </button>
         </div>
+
+        {activeTab === 'create' ? (
+          <>
+            {/* Quick Match Option */}
+            <div className="quick-match-section">
+              <div className="quick-match-card">
+                <div className="quick-match-icon">
+                  <FiZap />
+                </div>
+                <div className="quick-match-content">
+                  <h3>Quick Partner Match</h3>
+                  <p>Find an available partner or create a session for others to join</p>
+                </div>
+                <button 
+                  className="btn-quick-match"
+                  onClick={handleQuickMatch}
+                  disabled={loading || !goal.trim()}
+                >
+                  <FiUsers /> Quick Match
+                </button>
+              </div>
+            </div>
+
+            <div className="divider">
+              <span>OR CREATE A SPECIFIC TIME</span>
+            </div>
+            
+            <div className="booking-form">
+              {/* Date Selection */}
+              <div className="form-group">
+                <label><FiCalendar /> Select Date</label>
+                <div className="date-picker">
+                  {[0, 1, 2, 3, 4, 5, 6].map(days => {
+                    const date = addDays(new Date(), days);
+                    return (
+                      <button
+                        key={days}
+                        className={`date-btn ${selectedDate.toDateString() === date.toDateString() ? 'active' : ''}`}
+                        onClick={() => setSelectedDate(date)}
+                      >
+                        <div className="date-day">{formatDateLabel(date)}</div>
+                        <div className="date-num">{format(date, 'd')}</div>
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+
+              {/* Time Selection */}
+              <div className="form-group">
+                <label><FiClock /> Select Time</label>
+                <div className="time-grid">
+                  {availableSlots.map(slot => (
+                    <button
+                      key={slot.value}
+                      className={`time-slot ${selectedTime === slot.value ? 'active' : ''} ${
+                        slot.hour >= 9 && slot.hour <= 11 ? 'popular morning' :
+                        slot.hour >= 14 && slot.hour <= 17 ? 'popular afternoon' :
+                        slot.hour >= 19 && slot.hour <= 22 ? 'popular evening' : ''
+                      }`}
+                      onClick={() => setSelectedTime(slot.value)}
+                    >
+                      <span className="time-text">{slot.time}</span>
+                      <span className="available-indicator">✨ Available</span>
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              {/* Duration */}
+              <div className="form-group">
+                <label>Session Duration</label>
+                <div className="duration-options">
+                  {[
+                    { value: 25, label: '25 min', desc: 'Quick sprint', icon: '⚡' },
+                    { value: 50, label: '50 min', desc: 'Standard session', icon: '📚' },
+                    { value: 90, label: '90 min', desc: 'Deep focus', icon: '🎯' }
+                  ].map(option => (
+                    <button
+                      key={option.value}
+                      className={`duration-btn ${duration === option.value ? 'active' : ''}`}
+                      onClick={() => setDuration(option.value)}
+                    >
+                      <div className="duration-icon">{option.icon}</div>
+                      <div className="duration-content">
+                        <div className="duration-label">{option.label}</div>
+                        <div className="duration-desc">{option.desc}</div>
+                      </div>
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              {/* Goal Category */}
+              <div className="form-group">
+                <label>Study Category</label>
+                <div className="category-tabs">
+                  {Object.keys(goalCategories).map(category => (
+                    <button
+                      key={category}
+                      className={`category-tab ${selectedCategory === category ? 'active' : ''}`}
+                      onClick={() => setSelectedCategory(category)}
+                    >
+                      {category}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              {/* Goal */}
+              <div className="form-group">
+                <label><FiTarget /> Study Goal</label>
+                <textarea
+                  className="goal-input"
+                  placeholder="What will you work on during this session?"
+                  value={goal}
+                  onChange={(e) => setGoal(e.target.value)}
+                  maxLength={200}
+                  rows={3}
+                />
+                
+                <div className="goal-suggestions">
+                  <h4>Quick suggestions for {selectedCategory}:</h4>
+                  <div className="suggestions-grid">
+                    {goalCategories[selectedCategory].map((suggestion, i) => (
+                      <button
+                        key={i}
+                        className="suggestion-btn"
+                        onClick={() => handleGoalSuggestionClick(suggestion)}
+                      >
+                        {suggestion}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+                
+                <div className="char-counter">
+                  <span>{goal.length}/200</span>
+                </div>
+              </div>
+
+              {/* Create Button */}
+              <button
+                className="btn-primary btn-large"
+                onClick={handleCreateSession}
+                disabled={loading || !selectedTime || !goal.trim()}
+              >
+                {loading ? 'Creating Session...' : 'Create Session & Wait for Partner'}
+              </button>
+            </div>
+          </>
+        ) : (
+          // Join Available Sessions Tab
+          <div className="join-sessions-section">
+            {/* Date and Duration filters */}
+            <div className="filters-section">
+              <div className="form-group">
+                <label><FiCalendar /> Date</label>
+                <div className="date-picker">
+                  {[0, 1, 2, 3, 4, 5, 6].map(days => {
+                    const date = addDays(new Date(), days);
+                    return (
+                      <button
+                        key={days}
+                        className={`date-btn ${selectedDate.toDateString() === date.toDateString() ? 'active' : ''}`}
+                        onClick={() => setSelectedDate(date)}
+                      >
+                        <div className="date-day">{formatDateLabel(date)}</div>
+                        <div className="date-num">{format(date, 'd')}</div>
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+
+              <div className="form-group">
+                <label>Duration Filter</label>
+                <div className="duration-options">
+                  {[
+                    { value: 25, label: '25 min', icon: '⚡' },
+                    { value: 50, label: '50 min', icon: '📚' },
+                    { value: 90, label: '90 min', icon: '🎯' }
+                  ].map(option => (
+                    <button
+                      key={option.value}
+                      className={`duration-btn ${duration === option.value ? 'active' : ''}`}
+                      onClick={() => setDuration(option.value)}
+                    >
+                      <div className="duration-icon">{option.icon}</div>
+                      <div className="duration-label">{option.label}</div>
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              {/* Goal for joining */}
+              <div className="form-group">
+                <label><FiTarget /> Your Study Goal</label>
+                <textarea
+                  className="goal-input"
+                  placeholder="What will you work on during this session?"
+                  value={goal}
+                  onChange={(e) => setGoal(e.target.value)}
+                  maxLength={200}
+                  rows={2}
+                />
+                <div className="char-counter">
+                  <span>{goal.length}/200</span>
+                </div>
+              </div>
+            </div>
+
+            {/* Available Sessions List */}
+            <div className="available-sessions">
+              <h3>
+                <FiUsers /> Available Sessions ({availableSessions.length})
+              </h3>
+              
+              {loadingSessions ? (
+                <div className="loading-container">
+                  <div className="spinner"></div>
+                  <p>Loading available sessions...</p>
+                </div>
+              ) : availableSessions.length > 0 ? (
+                <div className="sessions-list">
+                  {availableSessions.map(session => (
+                    <div key={session.id} className="available-session-card">
+                      <div className="session-time">
+                        <div className="time-display">
+                          {format(new Date(session.startTime), 'h:mm a')}
+                        </div>
+                        <div className="date-display">
+                          {formatDateLabel(new Date(session.startTime))}
+                        </div>
+                      </div>
+                      
+                      <div className="session-details">
+                        <div className="creator-info">
+                          <div className="creator-avatar">
+                            {session.userPhoto ? (
+                              <img src={session.userPhoto} alt={session.userName} />
+                            ) : (
+                              <div className="avatar-placeholder">
+                                {session.userName?.charAt(0).toUpperCase() || 'S'}
+                              </div>
+                            )}
+                          </div>
+                          <div className="creator-name">
+                            {session.userName || 'Study Partner'}
+                          </div>
+                        </div>
+                        
+                        <div className="session-goal">
+                          <strong>Goal:</strong> {session.goal}
+                        </div>
+                        
+                        <div className="session-duration">
+                          <FiClock /> {session.duration} minutes
+                        </div>
+                      </div>
+                      
+                      <div className="session-actions">
+                        <button
+                          className="btn-primary"
+                          onClick={() => handleJoinSession(session.id, session.userName)}
+                          disabled={loading || !goal.trim()}
+                        >
+                          {loading ? 'Joining...' : 'Join Session'}
+                        </button>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <div className="empty-sessions">
+                  <div className="empty-icon">👥</div>
+                  <h4>No Available Sessions</h4>
+                  <p>No sessions available for {formatDateLabel(selectedDate)} with {duration}-minute duration.</p>
+                  <p>Try selecting a different date or duration, or create your own session!</p>
+                  <button 
+                    className="btn-secondary"
+                    onClick={() => setActiveTab('create')}
+                  >
+                    <FiUserPlus /> Create New Session
+                  </button>
+                </div>
+              )}
+            </div>
+          </div>
+        )}
       </div>
     </div>
   );
