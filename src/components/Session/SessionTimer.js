@@ -7,7 +7,8 @@ function SessionTimer({
   autoStart = false,
   onTimeUpdate,
   showBreakReminder = true,
-  isOverlay = false 
+  isOverlay = false,
+  isMobile = false 
 }) {
   const [timeLeft, setTimeLeft] = useState(duration * 60);
   const [isRunning, setIsRunning] = useState(autoStart);
@@ -309,13 +310,15 @@ function SessionTimer({
     return 'Ready to Focus';
   };
 
-  const circumference = 2 * Math.PI * 85;
+  const circumference = 2 * Math.PI * (isMobile ? 60 : 85);
   const strokeDashoffset = circumference - (getCurrentProgress() / 100) * circumference;
+  const circleRadius = isMobile ? 60 : 85;
+  const svgSize = isMobile ? 140 : 200;
 
   // Break time modal
   if (isBreakTime && sessionPhase === 'break' && !isRunning) {
     return (
-      <div className={`timer-widget break-modal ${isOverlay ? 'overlay' : ''}`}>
+      <div className={`timer-widget break-modal ${isOverlay ? 'overlay' : ''} ${isMobile ? 'mobile' : ''}`}>
         <div className="break-celebration">
           <div className="celebration-icon">🎉</div>
           <h3>Focus Session Complete!</h3>
@@ -337,7 +340,7 @@ function SessionTimer({
             <li>🚶‍♂️ Take a short walk</li>
             <li>💧 Drink some water</li>
             <li>👁️ Rest your eyes</li>
-            <li>🧘‍♂️ Do some stretches</li>
+            {!isMobile && <li>🧘‍♂️ Do some stretches</li>}
           </ul>
         </div>
       </div>
@@ -345,24 +348,24 @@ function SessionTimer({
   }
 
   return (
-    <div className={`timer-widget ${isOverlay ? 'overlay' : ''}`}>
+    <div className={`timer-widget ${isOverlay ? 'overlay' : ''} ${isMobile ? 'mobile' : ''}`}>
       <div className="timer-circle">
-        <svg className="timer-svg" viewBox="0 0 200 200">
+        <svg className="timer-svg" viewBox={`0 0 ${svgSize} ${svgSize}`}>
           <circle
             className="timer-circle-bg"
-            cx="100"
-            cy="100"
-            r="85"
-            strokeWidth="10"
+            cx={svgSize / 2}
+            cy={svgSize / 2}
+            r={circleRadius}
+            strokeWidth={isMobile ? 6 : 10}
             fill="none"
             stroke="#e5e7eb"
           />
           <circle
             className="timer-circle-progress"
-            cx="100"
-            cy="100"
-            r="85"
-            strokeWidth="10"
+            cx={svgSize / 2}
+            cy={svgSize / 2}
+            r={circleRadius}
+            strokeWidth={isMobile ? 6 : 10}
             fill="none"
             stroke={getTimerColor()}
             strokeLinecap="round"
@@ -390,19 +393,21 @@ function SessionTimer({
         <h3>
           {sessionPhase === 'break' ? 'Break Time' : 
            sessionPhase === 'completed' ? 'Completed!' : 
-           `${duration} Minute Session`}
+           `${duration} Min Session`}
         </h3>
         
-        <div className="motivational-message">
-          {motivationalMessage}
-        </div>
+        {!isMobile && (
+          <div className="motivational-message">
+            {motivationalMessage}
+          </div>
+        )}
         
         <div className="timer-stats">
           <div className="stat-item">
             <span className="stat-label">Progress:</span>
             <span className="stat-value">{Math.round(getCurrentProgress())}%</span>
           </div>
-          {sessionPhase === 'focus' && (
+          {sessionPhase === 'focus' && !isMobile && (
             <div className="stat-item">
               <span className="stat-label">Phase:</span>
               <span className="stat-value">
@@ -446,7 +451,7 @@ function SessionTimer({
           {soundEnabled ? <FiVolume2 /> : <FiVolumeX />}
         </button>
         
-        {sessionPhase === 'focus' && timeLeft > 0 && (
+        {sessionPhase === 'focus' && timeLeft > 0 && !isMobile && (
           <div className="extend-controls">
             <button 
               onClick={() => extendSession(5)}
@@ -466,7 +471,7 @@ function SessionTimer({
         )}
       </div>
       
-      {sessionPhase === 'focus' && (
+      {sessionPhase === 'focus' && !isMobile && (
         <div className="timer-tips">
           <div className="tip-rotation">
             <div className="tip active">
