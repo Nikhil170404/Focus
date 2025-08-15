@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
-import { FiPlay, FiPause, FiVolume2, FiVolumeX, FiRotateCcw, FiClock } from 'react-icons/fi';
+import { FiPlay, FiPause, FiVolume2, FiVolumeX, FiRotateCcw, FiClock, FiZap } from 'react-icons/fi';
 
 function SessionTimer({ 
   duration = 50, 
@@ -14,10 +14,9 @@ function SessionTimer({
   const [isRunning, setIsRunning] = useState(autoStart);
   const [soundEnabled, setSoundEnabled] = useState(true);
   const [isBreakTime, setIsBreakTime] = useState(false);
-  const [breakTimeLeft, setBreakTimeLeft] = useState(5 * 60); // 5 minute break
-  const [sessionPhase, setSessionPhase] = useState('focus'); // 'focus', 'break', 'completed'
+  const [breakTimeLeft, setBreakTimeLeft] = useState(5 * 60);
+  const [sessionPhase, setSessionPhase] = useState('focus');
   const [motivationalMessage, setMotivationalMessage] = useState('');
-  const [isMinimized, setIsMinimized] = useState(isMobile && isOverlay);
   
   const intervalRef = useRef(null);
   const audioContextRef = useRef(null);
@@ -35,7 +34,6 @@ function SessionTimer({
     "⭐ Focus brings results!",
     "🚀 Making progress every second!",
     "💎 Discipline creates diamonds!",
-    "🎨 Creating your masterpiece!",
     "📚 Knowledge is power!",
     "🏆 Champions focus like this!"
   ];
@@ -52,20 +50,20 @@ function SessionTimer({
     };
   }, []);
 
+  // Initialize motivational message
   useEffect(() => {
-    // Set initial motivational message
     setMotivationalMessage(getRandomMessage());
     
-    // Update message every 5 minutes
     const messageInterval = setInterval(() => {
       if (isRunning && sessionPhase === 'focus' && mountedRef.current) {
         setMotivationalMessage(getRandomMessage());
       }
-    }, 300000); // 5 minutes
+    }, 180000); // 3 minutes
 
     return () => clearInterval(messageInterval);
   }, [isRunning, sessionPhase, getRandomMessage]);
 
+  // Main timer logic
   useEffect(() => {
     if (isRunning && mountedRef.current) {
       intervalRef.current = setInterval(() => {
@@ -75,12 +73,10 @@ function SessionTimer({
           setTimeLeft(prevTime => {
             const newTime = prevTime - 1;
             
-            // Update parent component
             if (onTimeUpdate && mountedRef.current) {
               onTimeUpdate(newTime, totalSeconds);
             }
             
-            // Play notification sounds at specific intervals
             if (soundEnabled && mountedRef.current) {
               playNotificationSounds(newTime);
             }
@@ -123,7 +119,6 @@ function SessionTimer({
     
     const now = Date.now();
     
-    // Throttle notifications to prevent spam
     if (now - lastNotificationRef.current < 1000) return;
     
     if (newTime === 600) { // 10 minutes left
@@ -145,19 +140,17 @@ function SessionTimer({
     if (!mountedRef.current) return;
     
     try {
-      // Create AudioContext if not exists
       if (!audioContextRef.current) {
         audioContextRef.current = new (window.AudioContext || window.webkitAudioContext)();
       }
       
       const audioContext = audioContextRef.current;
       
-      // Generate different tones for different notifications
       const frequencies = {
-        gentle: [440, 554.37], // A4 and C#5
-        urgent: [523.25, 659.25], // C5 and E5
-        countdown: [698.46, 830.61], // F5 and G#5
-        complete: [523.25, 659.25, 783.99] // C5, E5, G5 (chord)
+        gentle: [440, 554.37],
+        urgent: [523.25, 659.25],
+        countdown: [698.46, 830.61],
+        complete: [523.25, 659.25, 783.99]
       };
       
       const freqs = frequencies[type] || frequencies.gentle;
@@ -175,7 +168,7 @@ function SessionTimer({
           oscillator.frequency.setValueAtTime(freq, audioContext.currentTime);
           oscillator.type = 'sine';
           
-          gainNode.gain.setValueAtTime(0.1, audioContext.currentTime);
+          gainNode.gain.setValueAtTime(0.05, audioContext.currentTime);
           gainNode.gain.exponentialRampToValueAtTime(0.01, audioContext.currentTime + 0.3);
           
           oscillator.start(audioContext.currentTime);
@@ -183,12 +176,10 @@ function SessionTimer({
         }, index * 100);
       });
       
-      // Show notification if supported
       if ('Notification' in window && Notification.permission === 'granted' && mountedRef.current) {
         new Notification('FocusMate Timer', {
           body: message,
-          icon: '/favicon.ico',
-          badge: '/favicon.ico'
+          icon: '/favicon.ico'
         });
       }
       
@@ -236,7 +227,7 @@ function SessionTimer({
     setIsBreakTime(true);
     setSessionPhase('break');
     setBreakTimeLeft(breakSeconds);
-    setMotivationalMessage('🧘‍♂️ Break time! Relax and recharge for 5 minutes');
+    setMotivationalMessage('🧘‍♂️ Break time! Relax and recharge');
   };
 
   const skipBreak = () => {
@@ -272,12 +263,6 @@ function SessionTimer({
     setSoundEnabled(!soundEnabled);
   };
 
-  const extendSession = (minutes) => {
-    if (!mountedRef.current) return;
-    
-    setTimeLeft(prevTime => prevTime + (minutes * 60));
-  };
-
   const formatTime = (seconds) => {
     const mins = Math.floor(seconds / 60);
     const secs = seconds % 60;
@@ -297,24 +282,26 @@ function SessionTimer({
   };
 
   const getTimerColor = () => {
-    if (sessionPhase === 'break') return '#10b981'; // Green for break
-    if (sessionPhase === 'completed') return '#8b5cf6'; // Purple for completed
-    if (timeLeft <= 60) return '#ef4444'; // Red for last minute
-    if (timeLeft <= 300) return '#f59e0b'; // Orange for last 5 minutes
-    return '#6366f1'; // Primary color
+    if (sessionPhase === 'break') return '#10b981';
+    if (sessionPhase === 'completed') return '#8b5cf6';
+    if (timeLeft <= 60) return '#ef4444';
+    if (timeLeft <= 300) return '#f59e0b';
+    return '#6366f1';
   };
 
   const getStatusText = () => {
-    if (sessionPhase === 'completed') return 'Session Complete! 🎉';
-    if (sessionPhase === 'break') return isRunning ? 'Break Time 🧘‍♂️' : 'Break Ready';
-    if (isRunning) return 'Focus Mode 🎯';
-    return 'Ready to Focus';
+    if (sessionPhase === 'completed') return 'Complete! 🎉';
+    if (sessionPhase === 'break') return isRunning ? 'Break Time' : 'Break Ready';
+    if (isRunning) return 'Focus Mode';
+    return 'Ready';
   };
 
-  const circleRadius = isMobile ? 40 : 60;
-  const circumference = 2 * Math.PI * circleRadius;
-  const strokeDashoffset = circumference - (getCurrentProgress() / 100) * circumference;
-  const svgSize = isMobile ? 100 : 140;
+  const getPhaseIcon = () => {
+    if (sessionPhase === 'completed') return '🎉';
+    if (sessionPhase === 'break') return '🧘‍♂️';
+    if (isRunning) return '🎯';
+    return '⏸️';
+  };
 
   // Break time modal
   if (isBreakTime && sessionPhase === 'break' && !isRunning) {
@@ -327,11 +314,11 @@ function SessionTimer({
         </div>
         
         <div className="break-options">
-          <button onClick={startBreak} className="timer-button primary">
-            <span>Take 5 Min Break</span>
+          <button onClick={startBreak} className="btn-primary">
+            Take 5 Min Break
           </button>
-          <button onClick={skipBreak} className="timer-button secondary">
-            <span>Skip Break</span>
+          <button onClick={skipBreak} className="btn-secondary">
+            Skip Break
           </button>
         </div>
         
@@ -348,33 +335,14 @@ function SessionTimer({
     );
   }
 
-  // Mobile minimized view
-  if (isMobile && isOverlay && isMinimized) {
-    return (
-      <div className="timer-widget mobile minimized-timer" onClick={() => setIsMinimized(false)}>
-        <div className="minimized-content">
-          <FiClock size={16} />
-          <span className="mini-time">{getCurrentTime()}</span>
-          <span className="mini-status">{isRunning ? '⏸️' : '▶️'}</span>
-        </div>
-      </div>
-    );
-  }
+  const circleRadius = isMobile && isOverlay ? 30 : isOverlay ? 40 : 60;
+  const circumference = 2 * Math.PI * circleRadius;
+  const strokeDashoffset = circumference - (getCurrentProgress() / 100) * circumference;
+  const svgSize = isMobile && isOverlay ? 80 : isOverlay ? 100 : 140;
 
   return (
-    <div className={`timer-widget ${isOverlay ? 'overlay' : ''} ${isMobile ? 'mobile' : 'desktop'}`}>
-      {isMobile && isOverlay && (
-        <div className="mobile-timer-header">
-          <span className="timer-title">Focus Timer</span>
-          <button 
-            className="minimize-btn"
-            onClick={() => setIsMinimized(true)}
-          >
-            −
-          </button>
-        </div>
-      )}
-
+    <div className={`timer-widget ${isOverlay ? 'overlay-timer' : 'standalone-timer'} ${isMobile ? 'mobile' : 'desktop'}`}>
+      {/* Timer Circle */}
       <div className="timer-circle">
         <svg className="timer-svg" viewBox={`0 0 ${svgSize} ${svgSize}`}>
           <circle
@@ -382,16 +350,16 @@ function SessionTimer({
             cx={svgSize / 2}
             cy={svgSize / 2}
             r={circleRadius}
-            strokeWidth={isMobile ? 4 : 6}
+            strokeWidth={isMobile && isOverlay ? 3 : isOverlay ? 4 : 6}
             fill="none"
-            stroke="#e5e7eb"
+            stroke="rgba(255, 255, 255, 0.1)"
           />
           <circle
             className="timer-circle-progress"
             cx={svgSize / 2}
             cy={svgSize / 2}
             r={circleRadius}
-            strokeWidth={isMobile ? 4 : 6}
+            strokeWidth={isMobile && isOverlay ? 3 : isOverlay ? 4 : 6}
             fill="none"
             stroke={getTimerColor()}
             strokeLinecap="round"
@@ -405,117 +373,90 @@ function SessionTimer({
           />
         </svg>
         
-        <div className="timer-text">
-          <div className="timer-value" style={{ color: getTimerColor() }}>
+        <div className="timer-content">
+          <div className="timer-time" style={{ color: getTimerColor() }}>
             {getCurrentTime()}
           </div>
-          <div className="timer-label">
-            {getStatusText()}
+          <div className="timer-status">
+            {getPhaseIcon()} {getStatusText()}
           </div>
         </div>
       </div>
       
-      <div className="timer-info">
-        <h3>
-          {sessionPhase === 'break' ? 'Break Time' : 
-           sessionPhase === 'completed' ? 'Completed!' : 
-           `${duration} Min Session`}
-        </h3>
-        
-        {!isMobile && !isOverlay && (
+      {/* Timer Info - Only show in non-overlay mode */}
+      {!isOverlay && (
+        <div className="timer-info">
+          <h3>
+            {sessionPhase === 'break' ? 'Break Time' : 
+             sessionPhase === 'completed' ? 'Completed!' : 
+             `${duration} Min Session`}
+          </h3>
+          
           <div className="motivational-message">
             {motivationalMessage}
           </div>
-        )}
-        
-        <div className="timer-stats">
-          <div className="stat-item">
-            <span className="stat-label">Progress:</span>
-            <span className="stat-value">{Math.round(getCurrentProgress())}%</span>
-          </div>
-          {sessionPhase === 'focus' && !isMobile && (
+          
+          <div className="timer-stats">
             <div className="stat-item">
-              <span className="stat-label">Phase:</span>
-              <span className="stat-value">
-                {timeLeft > 1800 ? 'Deep Focus' : 
-                 timeLeft > 600 ? 'Maintaining' : 
-                 timeLeft > 60 ? 'Final Push' : 'Sprint!'}
-              </span>
+              <span className="stat-label">Progress:</span>
+              <span className="stat-value">{Math.round(getCurrentProgress())}%</span>
             </div>
-          )}
+            {sessionPhase === 'focus' && (
+              <div className="stat-item">
+                <span className="stat-label">Phase:</span>
+                <span className="stat-value">
+                  {timeLeft > 1800 ? 'Deep Focus' : 
+                   timeLeft > 600 ? 'Maintaining' : 
+                   timeLeft > 60 ? 'Final Push' : 'Sprint!'}
+                </span>
+              </div>
+            )}
+          </div>
         </div>
-      </div>
+      )}
       
+      {/* Timer Controls */}
       <div className="timer-controls">
         <button 
           onClick={toggleTimer} 
           className={`timer-button primary ${sessionPhase === 'completed' ? 'restart' : ''}`}
+          title={sessionPhase === 'completed' ? 'New Session' : isRunning ? 'Pause' : 'Start'}
         >
           {sessionPhase === 'completed' ? (
-            <>
-              <FiRotateCcw />
-              <span>New Session</span>
-            </>
+            <FiRotateCcw />
           ) : isRunning ? (
-            <>
-              <FiPause />
-              <span>Pause</span>
-            </>
+            <FiPause />
           ) : (
-            <>
-              <FiPlay />
-              <span>Start</span>
-            </>
+            <FiPlay />
+          )}
+          {!isOverlay && (
+            <span>
+              {sessionPhase === 'completed' ? 'New Session' : isRunning ? 'Pause' : 'Start'}
+            </span>
           )}
         </button>
         
         <button 
           onClick={toggleSound} 
-          className={`timer-button ${soundEnabled ? 'active' : 'muted'}`}
+          className={`timer-button sound ${soundEnabled ? 'active' : 'muted'}`}
           title={soundEnabled ? 'Disable notifications' : 'Enable notifications'}
         >
           {soundEnabled ? <FiVolume2 /> : <FiVolumeX />}
         </button>
-        
-        {sessionPhase === 'focus' && timeLeft > 0 && !isMobile && !isOverlay && (
-          <div className="extend-controls">
-            <button 
-              onClick={() => extendSession(5)}
-              className="timer-button extend"
-              title="Add 5 minutes"
-            >
-              +5m
-            </button>
-            <button 
-              onClick={() => extendSession(10)}
-              className="timer-button extend"
-              title="Add 10 minutes"
-            >
-              +10m
-            </button>
-          </div>
-        )}
       </div>
       
-      {sessionPhase === 'focus' && !isMobile && !isOverlay && (
-        <div className="timer-tips">
-          <div className="tip-rotation">
-            <div className="tip active">
-              💡 <strong>Pro Tip:</strong> Take deep breaths to maintain focus
-            </div>
-          </div>
+      {/* Progress Bar for Mobile Overlay */}
+      {isMobile && isOverlay && (
+        <div className="timer-progress-bar">
+          <div 
+            className="progress-fill" 
+            style={{ 
+              width: `${getCurrentProgress()}%`,
+              backgroundColor: getTimerColor()
+            }}
+          />
         </div>
       )}
-      
-      <div className="timer-progress-bar">
-        <div 
-          className="progress-fill" 
-          style={{ 
-            width: `${getCurrentProgress()}%`,
-            backgroundColor: getTimerColor()
-          }}
-        />
-      </div>
     </div>
   );
 }

@@ -11,13 +11,23 @@ import {
   orderBy,
   runTransaction,
   doc,
-  Timestamp,
   addDoc
 } from 'firebase/firestore';
 import { db } from '../../config/firebase';
 import { useAuth } from '../../hooks/useAuth';
 import { addDays, addHours, format, isToday, isTomorrow } from 'date-fns';
-import { FiCalendar, FiClock, FiTarget, FiArrowLeft, FiUsers, FiZap, FiEye, FiUserPlus } from 'react-icons/fi';
+import { 
+  FiCalendar, 
+  FiClock, 
+  FiTarget, 
+  FiArrowLeft, 
+  FiUsers, 
+  FiZap, 
+  FiEye, 
+  FiUserPlus,
+  FiRefreshCw,
+  FiLoader
+} from 'react-icons/fi';
 import toast from 'react-hot-toast';
 
 function SessionBooking() {
@@ -34,7 +44,8 @@ function SessionBooking() {
   const [availableSessions, setAvailableSessions] = useState([]);
   const [loadingSlots, setLoadingSlots] = useState(false);
   const [loadingSessions, setLoadingSessions] = useState(false);
-  const [activeTab, setActiveTab] = useState('create'); // 'create' or 'join'
+  const [activeTab, setActiveTab] = useState('create');
+  const [refreshing, setRefreshing] = useState(false);
 
   // Enhanced goal suggestions categorized by exam/subject
   const goalCategories = {
@@ -73,6 +84,15 @@ function SessionBooking() {
   };
 
   const [selectedCategory, setSelectedCategory] = useState('General');
+  const [isMobile, setIsMobile] = useState(false);
+
+  // Check if mobile
+  useEffect(() => {
+    const checkMobile = () => setIsMobile(window.innerWidth <= 768);
+    checkMobile();
+    window.addEventListener('resize', checkMobile);
+    return () => window.removeEventListener('resize', checkMobile);
+  }, []);
 
   // Generate time slots for the day
   const generateTimeSlots = useCallback(() => {
@@ -101,10 +121,10 @@ function SessionBooking() {
   }, [selectedDate, duration]);
 
   // Fetch available sessions that users can join
-  const fetchAvailableSessions = useCallback(async () => {
+  const fetchAvailableSessions = useCallback(async (showLoader = true) => {
     if (!user) return;
     
-    setLoadingSessions(true);
+    if (showLoader) setLoadingSessions(true);
     try {
       const now = new Date();
       const dayStart = new Date(selectedDate);
@@ -137,6 +157,9 @@ function SessionBooking() {
     } catch (error) {
       console.error('Error fetching available sessions:', error);
       setAvailableSessions([]);
+      if (showLoader) {
+        toast.error('Failed to load available sessions');
+      }
     } finally {
       setLoadingSessions(false);
     }
@@ -201,7 +224,6 @@ function SessionBooking() {
       const sessionRef = doc(collection(db, 'sessions'));
       
       const result = await runTransaction(db, async (transaction) => {
-        // Create the session
         const newSessionData = {
           ...sessionData,
           id: sessionRef.id,
@@ -411,10 +433,10 @@ function SessionBooking() {
       console.error('Error joining session:', error);
       if (error.message === 'Session already has a partner') {
         toast.error('This session is now full. Please try another one.');
-        fetchAvailableSessions(); // Refresh the list
+        fetchAvailableSessions(false); // Refresh the list
       } else if (error.message === 'Session no longer exists') {
         toast.error('This session is no longer available.');
-        fetchAvailableSessions(); // Refresh the list
+        fetchAvailableSessions(false); // Refresh the list
       } else {
         toast.error('Failed to join session. Please try again.');
       }
@@ -425,6 +447,17 @@ function SessionBooking() {
 
   const handleGoalSuggestionClick = (suggestion) => {
     setGoal(suggestion);
+  };
+
+  const handleRefresh = () => {
+    setRefreshing(true);
+    if (activeTab === 'join') {
+      fetchAvailableSessions(false).finally(() => setRefreshing(false));
+    } else {
+      generateTimeSlots();
+      setRefreshing(false);
+    }
+    toast.success('Refreshed!');
   };
 
   return (
@@ -442,6 +475,13 @@ function SessionBooking() {
             <h2 className="booking-title">Study Sessions</h2>
             <p className="booking-subtitle">Create a session or join an existing one</p>
           </div>
+          <button 
+            className="refresh-button"
+            onClick={handleRefresh}
+            disabled={refreshing}
+          >
+            <FiRefreshCw className={refreshing ? 'spinning' : ''} />
+          </button>
         </div>
 
         {/* Tab Switcher */}
@@ -456,7 +496,7 @@ function SessionBooking() {
             className={`tab-button ${activeTab === 'join' ? 'active' : ''}`}
             onClick={() => setActiveTab('join')}
           >
-            <FiEye /> Join Available Sessions
+            <FiEye /> Join Sessions ({availableSessions.length})
           </button>
         </div>
 
@@ -477,7 +517,8 @@ function SessionBooking() {
                   onClick={handleQuickMatch}
                   disabled={loading || !goal.trim()}
                 >
-                  <FiUsers /> Quick Match
+                  {loading ? <FiLoader className="spinning" /> : <FiUsers />}
+                  Quick Match
                 </button>
               </div>
             </div>
@@ -522,7 +563,7 @@ function SessionBooking() {
                       onClick={() => setSelectedTime(slot.value)}
                     >
                       <span className="time-text">{slot.time}</span>
-                      <span className="available-indicator">✨ Available</span>
+                      {!isMobile && <span className="available-indicator">✨ Available</span>}
                     </button>
                   ))}
                 </div>
@@ -545,7 +586,7 @@ function SessionBooking() {
                       <div className="duration-icon">{option.icon}</div>
                       <div className="duration-content">
                         <div className="duration-label">{option.label}</div>
-                        <div className="duration-desc">{option.desc}</div>
+                        {!isMobile && <div className="duration-desc">{option.desc}</div>}
                       </div>
                     </button>
                   ))}
@@ -606,7 +647,17 @@ function SessionBooking() {
                 onClick={handleCreateSession}
                 disabled={loading || !selectedTime || !goal.trim()}
               >
-                {loading ? 'Creating Session...' : 'Create Session & Wait for Partner'}
+                {loading ? (
+                  <>
+                    <FiLoader className="spinning" />
+                    Creating Session...
+                  </>
+                ) : (
+                  <>
+                    <FiUserPlus />
+                    Create Session & Wait for Partner
+                  </>
+                )}
               </button>
             </div>
           </>
@@ -673,13 +724,22 @@ function SessionBooking() {
 
             {/* Available Sessions List */}
             <div className="available-sessions">
-              <h3>
-                <FiUsers /> Available Sessions ({availableSessions.length})
-              </h3>
+              <div className="sessions-header">
+                <h3>
+                  <FiUsers /> Available Sessions ({availableSessions.length})
+                </h3>
+                <button 
+                  className="refresh-sessions"
+                  onClick={() => fetchAvailableSessions(false)}
+                  disabled={loadingSessions}
+                >
+                  <FiRefreshCw className={loadingSessions ? 'spinning' : ''} />
+                </button>
+              </div>
               
               {loadingSessions ? (
                 <div className="loading-container">
-                  <div className="spinner"></div>
+                  <FiLoader className="spinner" />
                   <p>Loading available sessions...</p>
                 </div>
               ) : availableSessions.length > 0 ? (
@@ -706,17 +766,18 @@ function SessionBooking() {
                               </div>
                             )}
                           </div>
-                          <div className="creator-name">
-                            {session.userName || 'Study Partner'}
+                          <div className="creator-details">
+                            <div className="creator-name">
+                              {session.userName || 'Study Partner'}
+                            </div>
+                            <div className="session-duration">
+                              <FiClock /> {session.duration} minutes
+                            </div>
                           </div>
                         </div>
                         
                         <div className="session-goal">
                           <strong>Goal:</strong> {session.goal}
-                        </div>
-                        
-                        <div className="session-duration">
-                          <FiClock /> {session.duration} minutes
                         </div>
                       </div>
                       
@@ -726,7 +787,14 @@ function SessionBooking() {
                           onClick={() => handleJoinSession(session.id, session.userName)}
                           disabled={loading || !goal.trim()}
                         >
-                          {loading ? 'Joining...' : 'Join Session'}
+                          {loading ? (
+                            <FiLoader className="spinning" />
+                          ) : (
+                            <>
+                              <FiUsers />
+                              {isMobile ? 'Join' : 'Join Session'}
+                            </>
+                          )}
                         </button>
                       </div>
                     </div>
