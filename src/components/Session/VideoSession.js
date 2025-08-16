@@ -30,6 +30,7 @@ function VideoSession() {
   const mountedRef = useRef(true);
   const cleanupRef = useRef(false);
   const localParticipantIdRef = useRef(null);
+  const participantsRef = useRef(new Set());
   
   // Component state
   const [session, setSession] = useState(null);
@@ -42,6 +43,7 @@ function VideoSession() {
   const [networkStatus, setNetworkStatus] = useState('online');
   const [jitsiReady, setJitsiReady] = useState(false);
   const [userRole, setUserRole] = useState(null);
+  const [jitsiConnected, setJitsiConnected] = useState(false);
   
   // Mobile responsive states
   const [isMobile, setIsMobile] = useState(false);
@@ -95,12 +97,36 @@ function VideoSession() {
         console.log('⏰ Loading timeout reached, forcing ready state');
         setLoading(false);
         setJitsiReady(true);
-        setConnectionStatus('waiting');
       }
-    }, 10000); // Increased timeout for mobile
+    }, 8000);
 
     return () => clearTimeout(timeout);
   }, [loading]);
+
+  // Update connection status based on participant count and jitsi connection
+  const updateConnectionStatus = useCallback(() => {
+    if (!jitsiConnected) {
+      setConnectionStatus('connecting');
+      setPartnerConnected(false);
+      setSessionActive(false);
+      return;
+    }
+
+    const currentParticipants = participantsRef.current.size;
+    console.log('🔄 Updating connection status. Participants:', currentParticipants, 'Jitsi connected:', jitsiConnected);
+    
+    if (currentParticipants >= 2) {
+      setConnectionStatus('connected');
+      setPartnerConnected(true);
+      setSessionActive(true);
+    } else {
+      setConnectionStatus('waiting');
+      setPartnerConnected(false);
+      setSessionActive(false);
+    }
+    
+    setParticipantCount(currentParticipants);
+  }, [jitsiConnected]);
 
   // End session function
   const endSession = useCallback(async () => {
@@ -272,7 +298,7 @@ function VideoSession() {
           }
         }, 100);
         
-        setTimeout(() => clearInterval(checkInterval), 15000); // Longer timeout
+        setTimeout(() => clearInterval(checkInterval), 15000);
         return;
       }
 
@@ -314,7 +340,6 @@ function VideoSession() {
         console.log('🎯 Creating Jitsi API instance');
         apiRef.current = new window.JitsiMeetExternalAPI(domain, options);
         setupEventListeners();
-        setConnectionStatus('connecting');
         
         // Longer timeout for mobile
         setTimeout(() => {
@@ -323,7 +348,7 @@ function VideoSession() {
             setLoading(false);
             setJitsiReady(true);
           }
-        }, 3000);
+        }, 2000);
         
       } catch (error) {
         console.error('❌ Failed to create Jitsi API:', error);
@@ -346,18 +371,14 @@ function VideoSession() {
           
           console.log('👤 Participant joined:', participant.displayName, 'ID:', participant.id);
           
-          // Don't count the local participant
+          // Add to participants set
+          participantsRef.current.add(participant.id);
+          console.log('📊 Current participants:', Array.from(participantsRef.current));
+          
+          updateConnectionStatus();
+          
+          // Show toast only for remote participants
           if (participant.id !== localParticipantIdRef.current) {
-            setParticipantCount(prev => {
-              const newCount = prev + 1;
-              console.log('📊 Participant count increased to:', newCount);
-              return newCount;
-            });
-            
-            setPartnerConnected(true);
-            setConnectionStatus('connected');
-            setSessionActive(true);
-            
             toast.success(`${participant.displayName || 'Study partner'} joined! 🎉`);
           }
         });
@@ -367,17 +388,14 @@ function VideoSession() {
           
           console.log('👤 Participant left:', participant.displayName, 'ID:', participant.id);
           
-          // Don't count the local participant leaving
+          // Remove from participants set
+          participantsRef.current.delete(participant.id);
+          console.log('📊 Current participants after leave:', Array.from(participantsRef.current));
+          
+          updateConnectionStatus();
+          
+          // Show toast only for remote participants
           if (participant.id !== localParticipantIdRef.current) {
-            setParticipantCount(prev => {
-              const newCount = Math.max(1, prev - 1);
-              console.log('📊 Participant count decreased to:', newCount);
-              return newCount;
-            });
-            
-            setPartnerConnected(false);
-            setConnectionStatus('waiting');
-            setSessionActive(false);
             toast(`${participant.displayName || 'Study partner'} left the session`);
           }
         });
@@ -387,28 +405,32 @@ function VideoSession() {
           
           console.log('🎯 Video conference joined:', conference);
           
-          // Store local participant ID
+          // Store local participant ID and add to participants
           localParticipantIdRef.current = conference.id;
+          participantsRef.current.add(conference.id);
           
-          setParticipantCount(1);
+          setJitsiConnected(true);
           setError(null);
           setLoading(false);
           setJitsiReady(true);
-          setConnectionStatus('waiting');
+          
+          updateConnectionStatus();
           
           if (sessionData.userId === user?.uid) {
             setUserRole('creator');
             toast.success('Session created! Waiting for partner...');
           } else {
             setUserRole('joiner');
-            toast.success('Joined session! Waiting for others...');
+            toast.success('Joined session successfully!');
           }
         });
 
         apiRef.current.on('videoConferenceLeft', () => {
           if (!mountedRef.current || cleanupRef.current) return;
           console.log('📤 Video conference left');
-          setConnectionStatus('disconnected');
+          setJitsiConnected(false);
+          participantsRef.current.clear();
+          updateConnectionStatus();
         });
 
         apiRef.current.on('readyToClose', () => {
@@ -418,21 +440,13 @@ function VideoSession() {
           }
         });
 
-        // Additional mobile-specific events
-        apiRef.current.on('participantRoleChanged', (event) => {
-          console.log('👑 Participant role changed:', event);
-        });
-
-        apiRef.current.on('displayNameChange', (event) => {
-          console.log('📝 Display name changed:', event);
-        });
-
-        // Connection quality events
+        // Additional events for better connection tracking
         apiRef.current.on('connectionQualityChanged', (event) => {
           console.log('📶 Connection quality:', event);
-          if (event.connectionQuality === 'poor') {
-            console.warn('⚠️ Poor connection quality detected');
-          }
+        });
+
+        apiRef.current.on('connectionStatus', (event) => {
+          console.log('🔌 Connection status event:', event);
         });
 
       } catch (error) {
@@ -443,7 +457,7 @@ function VideoSession() {
     };
 
     loadJitsiAndInitialize();
-  }, [sessionId, user, isMobile, endSession]);
+  }, [sessionId, user, isMobile, endSession, updateConnectionStatus]);
 
   // Session listener
   useEffect(() => {
@@ -488,13 +502,13 @@ function VideoSession() {
               setUserRole('joiner');
             }
             
-            // Initialize Jitsi - with delay for mobile
+            // Initialize Jitsi
             if (jitsiContainerRef.current && 
                 !initializationRef.current && 
                 !apiRef.current && 
                 sessionData.status === 'scheduled') {
               
-              const delay = isMobile ? 2000 : 1000; // Longer delay for mobile
+              const delay = isMobile ? 1500 : 1000;
               setTimeout(() => {
                 if (mountedRef.current && 
                     !cleanupRef.current && 
@@ -546,6 +560,7 @@ function VideoSession() {
       
       initializationRef.current = false;
       scriptLoadedRef.current = false;
+      participantsRef.current.clear();
     };
   }, []);
 
@@ -564,7 +579,7 @@ function VideoSession() {
       case 'connecting':
         return '🟡 Connecting...';
       case 'waiting':
-        return userRole === 'creator' ? '⏳ Waiting for partner' : '⏳ Waiting to connect';
+        return userRole === 'creator' ? '⏳ Waiting for partner' : '⏳ Ready, waiting for partner';
       case 'connected':
         return `🟢 Connected (${participantCount} ${participantCount === 1 ? 'person' : 'people'})`;
       case 'disconnected':
@@ -574,8 +589,31 @@ function VideoSession() {
     }
   };
 
+  const getPartnerStatusText = () => {
+    if (!session) return 'Loading...';
+    
+    if (!session.partnerId) {
+      return 'Waiting for partner...';
+    }
+    
+    const partnerName = session.partnerName || 'Study Partner';
+    
+    if (partnerConnected && sessionActive) {
+      return `${partnerName} (Connected)`;
+    } else {
+      return `${partnerName} (Connecting...)`;
+    }
+  };
+
+  const shouldShowTimer = () => {
+    // Show timer when both conditions are met:
+    // 1. Session is active (both participants connected)
+    // 2. Jitsi is ready and connected
+    return sessionActive && partnerConnected && jitsiReady && jitsiConnected && session;
+  };
+
   const getTimerConfig = () => {
-    if (!session || !sessionActive || !partnerConnected) return null;
+    if (!shouldShowTimer()) return null;
     
     return {
       duration: session?.duration || 50,
@@ -696,7 +734,7 @@ function VideoSession() {
           )}
         </div>
 
-        {/* Session Timer - Show when active */}
+        {/* Session Timer - Show when both participants are connected */}
         {(() => {
           const timerConfig = getTimerConfig();
           if (!timerConfig) return null;
@@ -763,11 +801,7 @@ function VideoSession() {
             <div className="detail-row">
               <span className="label">Partner:</span>
               <span className={`value ${partnerConnected ? 'connected' : 'waiting'}`}>
-                {session?.partnerId ? (
-                  `${session.partnerName || 'Study Partner'} ${partnerConnected ? '(Connected)' : '(Joining...)'}`
-                ) : (
-                  'Waiting for partner...'
-                )}
+                {getPartnerStatusText()}
               </span>
             </div>
             
@@ -782,6 +816,23 @@ function VideoSession() {
                 {getConnectionStatusText()}
               </span>
             </div>
+
+            <div className="detail-row">
+              <span className="label">Timer:</span>
+              <span className="value">
+                {shouldShowTimer() ? '🟢 Active' : '⏸️ Waiting for all participants'}
+              </span>
+            </div>
+
+            {/* Debug info (remove in production) */}
+            {process.env.NODE_ENV === 'development' && (
+              <div className="detail-row">
+                <span className="label">Debug:</span>
+                <span className="value">
+                  J:{jitsiConnected ? '✓' : '✗'} P:{participantCount} A:{sessionActive ? '✓' : '✗'}
+                </span>
+              </div>
+            )}
 
             {/* Mobile tips */}
             {isMobile && (
