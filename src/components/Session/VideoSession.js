@@ -29,6 +29,7 @@ function VideoSession() {
   const sessionListenerRef = useRef(null);
   const mountedRef = useRef(true);
   const cleanupRef = useRef(false);
+  const localParticipantIdRef = useRef(null);
   
   // Component state
   const [session, setSession] = useState(null);
@@ -91,11 +92,12 @@ function VideoSession() {
   useEffect(() => {
     const timeout = setTimeout(() => {
       if (loading && mountedRef.current && !cleanupRef.current) {
+        console.log('⏰ Loading timeout reached, forcing ready state');
         setLoading(false);
         setJitsiReady(true);
         setConnectionStatus('waiting');
       }
-    }, 8000);
+    }, 10000); // Increased timeout for mobile
 
     return () => clearTimeout(timeout);
   }, [loading]);
@@ -170,6 +172,7 @@ function VideoSession() {
     }
 
     initializationRef.current = true;
+    console.log('🚀 Initializing Jitsi for mobile:', isMobile);
     
     const roomName = `focusmate-${sessionId}`.replace(/[^a-zA-Z0-9-]/g, '');
     const domain = 'meet.jit.si';
@@ -189,21 +192,60 @@ function VideoSession() {
         prejoinPageEnabled: false,
         disableInviteFunctions: true,
         enableWelcomePage: false,
-        resolution: isMobile ? 480 : 720,
+        requireDisplayName: false,
+        // CRITICAL: Force web mode - prevent mobile app redirects
+        disableDeepLinking: true,
+        enableClosePage: false,
+        disableProfile: true,
+        // Mobile optimizations
+        resolution: isMobile ? 360 : 720,
         constraints: {
           video: {
             aspectRatio: 16 / 9,
-            height: { ideal: isMobile ? 480 : 720, max: isMobile ? 720 : 1080 }
+            height: { ideal: isMobile ? 360 : 720, max: isMobile ? 480 : 1080 },
+            width: { ideal: isMobile ? 640 : 1280, max: isMobile ? 854 : 1920 }
+          },
+          audio: {
+            echoCancellation: true,
+            noiseSuppression: true
           }
-        }
+        },
+        // Additional mobile config
+        enableLayerSuspension: true,
+        p2p: {
+          enabled: true,
+          stunServers: [
+            { urls: 'stun:stun.l.google.com:19302' },
+            { urls: 'stun:stun1.l.google.com:19302' }
+          ]
+        },
+        // Force browser mode
+        enableInsecureRoomNameWarning: false,
+        enableLobbyChat: false
       },
       interfaceConfigOverwrite: {
         MOBILE_APP_PROMO: false,
         SHOW_JITSI_WATERMARK: false,
+        SHOW_BRAND_WATERMARK: false,
+        SHOW_POWERED_BY: false,
+        DISABLE_FOCUS_INDICATOR: true,
+        DISABLE_PRESENCE_STATUS: true,
+        // CRITICAL: Force web interface
+        ENABLE_MOBILE_BROWSER: true,
+        HIDE_DEEP_LINKING_LOGO: true,
+        NATIVE_APP_NAME: undefined,
+        APP_NAME: 'FocusMate',
+        // Different toolbar for mobile vs desktop
         TOOLBAR_BUTTONS: isMobile ? 
-          ['microphone', 'camera', 'chat', 'hangup'] :
+          ['microphone', 'camera', 'hangup'] :
           ['microphone', 'camera', 'chat', 'participants', 'hangup', 'settings'],
-        DISABLE_JOIN_LEAVE_NOTIFICATIONS: false
+        DISABLE_JOIN_LEAVE_NOTIFICATIONS: false,
+        // Mobile-specific interface
+        TOOLBAR_ALWAYS_VISIBLE: isMobile,
+        FILM_STRIP_MAX_HEIGHT: isMobile ? 80 : 120,
+        // Force video layout
+        VIDEO_LAYOUT_FIT: 'both',
+        TILE_VIEW_MAX_COLUMNS: isMobile ? 1 : 2
       }
     };
 
@@ -230,7 +272,7 @@ function VideoSession() {
           }
         }, 100);
         
-        setTimeout(() => clearInterval(checkInterval), 10000);
+        setTimeout(() => clearInterval(checkInterval), 15000); // Longer timeout
         return;
       }
 
@@ -241,6 +283,7 @@ function VideoSession() {
       script.async = true;
       
       script.onload = () => {
+        console.log('✅ Jitsi script loaded');
         if (!mountedRef.current || cleanupRef.current || apiRef.current) {
           initializationRef.current = false;
           return;
@@ -249,6 +292,7 @@ function VideoSession() {
       };
       
       script.onerror = (error) => {
+        console.error('❌ Failed to load Jitsi script:', error);
         initializationRef.current = false;
         scriptLoadedRef.current = false;
         if (mountedRef.current && !cleanupRef.current) {
@@ -267,18 +311,22 @@ function VideoSession() {
       }
 
       try {
+        console.log('🎯 Creating Jitsi API instance');
         apiRef.current = new window.JitsiMeetExternalAPI(domain, options);
         setupEventListeners();
         setConnectionStatus('connecting');
         
+        // Longer timeout for mobile
         setTimeout(() => {
           if (mountedRef.current && !cleanupRef.current) {
+            console.log('✅ Jitsi initialization complete');
             setLoading(false);
             setJitsiReady(true);
           }
-        }, 2000);
+        }, 3000);
         
       } catch (error) {
+        console.error('❌ Failed to create Jitsi API:', error);
         initializationRef.current = false;
         if (mountedRef.current && !cleanupRef.current) {
           setError('Failed to initialize video connection.');
@@ -291,15 +339,21 @@ function VideoSession() {
       if (!apiRef.current || !mountedRef.current || cleanupRef.current) return;
 
       try {
+        console.log('🔗 Setting up Jitsi event listeners');
+        
         apiRef.current.on('participantJoined', (participant) => {
           if (!mountedRef.current || cleanupRef.current) return;
           
-          setParticipantCount(prev => prev + 1);
+          console.log('👤 Participant joined:', participant.displayName, 'ID:', participant.id);
           
-          const isCurrentUser = participant.id === user?.uid || 
-                               participant.displayName === user?.displayName;
-          
-          if (!isCurrentUser) {
+          // Don't count the local participant
+          if (participant.id !== localParticipantIdRef.current) {
+            setParticipantCount(prev => {
+              const newCount = prev + 1;
+              console.log('📊 Participant count increased to:', newCount);
+              return newCount;
+            });
+            
             setPartnerConnected(true);
             setConnectionStatus('connected');
             setSessionActive(true);
@@ -311,12 +365,16 @@ function VideoSession() {
         apiRef.current.on('participantLeft', (participant) => {
           if (!mountedRef.current || cleanupRef.current) return;
           
-          setParticipantCount(prev => Math.max(1, prev - 1));
+          console.log('👤 Participant left:', participant.displayName, 'ID:', participant.id);
           
-          const isCurrentUser = participant.id === user?.uid || 
-                               participant.displayName === user?.displayName;
-          
-          if (!isCurrentUser) {
+          // Don't count the local participant leaving
+          if (participant.id !== localParticipantIdRef.current) {
+            setParticipantCount(prev => {
+              const newCount = Math.max(1, prev - 1);
+              console.log('📊 Participant count decreased to:', newCount);
+              return newCount;
+            });
+            
             setPartnerConnected(false);
             setConnectionStatus('waiting');
             setSessionActive(false);
@@ -324,8 +382,13 @@ function VideoSession() {
           }
         });
 
-        apiRef.current.on('videoConferenceJoined', () => {
+        apiRef.current.on('videoConferenceJoined', (conference) => {
           if (!mountedRef.current || cleanupRef.current) return;
+          
+          console.log('🎯 Video conference joined:', conference);
+          
+          // Store local participant ID
+          localParticipantIdRef.current = conference.id;
           
           setParticipantCount(1);
           setError(null);
@@ -344,17 +407,36 @@ function VideoSession() {
 
         apiRef.current.on('videoConferenceLeft', () => {
           if (!mountedRef.current || cleanupRef.current) return;
+          console.log('📤 Video conference left');
           setConnectionStatus('disconnected');
         });
 
         apiRef.current.on('readyToClose', () => {
+          console.log('🔚 Jitsi ready to close');
           if (!cleanupRef.current) {
             endSession();
           }
         });
 
+        // Additional mobile-specific events
+        apiRef.current.on('participantRoleChanged', (event) => {
+          console.log('👑 Participant role changed:', event);
+        });
+
+        apiRef.current.on('displayNameChange', (event) => {
+          console.log('📝 Display name changed:', event);
+        });
+
+        // Connection quality events
+        apiRef.current.on('connectionQualityChanged', (event) => {
+          console.log('📶 Connection quality:', event);
+          if (event.connectionQuality === 'poor') {
+            console.warn('⚠️ Poor connection quality detected');
+          }
+        });
+
       } catch (error) {
-        console.error('Error setting up event listeners:', error);
+        console.error('❌ Error setting up event listeners:', error);
         setError('Failed to setup video connection');
         setLoading(false);
       }
@@ -406,12 +488,13 @@ function VideoSession() {
               setUserRole('joiner');
             }
             
-            // Initialize Jitsi
+            // Initialize Jitsi - with delay for mobile
             if (jitsiContainerRef.current && 
                 !initializationRef.current && 
                 !apiRef.current && 
                 sessionData.status === 'scheduled') {
               
+              const delay = isMobile ? 2000 : 1000; // Longer delay for mobile
               setTimeout(() => {
                 if (mountedRef.current && 
                     !cleanupRef.current && 
@@ -419,7 +502,7 @@ function VideoSession() {
                     !apiRef.current) {
                   initializeJitsi(sessionData);
                 }
-              }, 1000);
+              }, delay);
             }
           } else {
             setError('Session not found');
@@ -428,11 +511,13 @@ function VideoSession() {
         },
         (error) => {
           if (!mountedRef.current || cleanupRef.current) return;
+          console.error('❌ Session listener error:', error);
           setError(`Error loading session: ${error.message}`);
           setLoading(false);
         }
       );
     } catch (error) {
+      console.error('❌ Failed to setup session listener:', error);
       setError('Failed to connect to session');
       setLoading(false);
     }
@@ -443,7 +528,7 @@ function VideoSession() {
         sessionListenerRef.current = null;
       }
     };
-  }, [sessionId, user?.uid, navigate, initializeJitsi]);
+  }, [sessionId, user?.uid, navigate, initializeJitsi, isMobile]);
 
   // Cleanup on unmount
   useEffect(() => {
@@ -481,7 +566,7 @@ function VideoSession() {
       case 'waiting':
         return userRole === 'creator' ? '⏳ Waiting for partner' : '⏳ Waiting to connect';
       case 'connected':
-        return '🟢 Connected';
+        return `🟢 Connected (${participantCount} ${participantCount === 1 ? 'person' : 'people'})`;
       case 'disconnected':
         return '🔴 Disconnected';
       default:
@@ -527,7 +612,12 @@ function VideoSession() {
         <div className="loading-container">
           <FiLoader className="spinner" />
           <p>Setting up your focus session...</p>
-          <small>Preparing video connection</small>
+          <small>{isMobile ? 'Optimizing for mobile...' : 'Preparing video connection'}</small>
+          {isMobile && (
+            <div className="mobile-tips">
+              <p>💡 Stay on this page - don't switch to the app</p>
+            </div>
+          )}
         </div>
       </div>
     );
@@ -588,6 +678,7 @@ function VideoSession() {
             <div className="video-overlay">
               <FiLoader className="spinner" />
               <p>Connecting to video...</p>
+              {isMobile && <small>Keep this page open</small>}
             </div>
           )}
           
@@ -598,6 +689,9 @@ function VideoSession() {
               <div className="waiting-dots">
                 <span></span><span></span><span></span>
               </div>
+              {isMobile && (
+                <small>Share this session or wait for someone to join</small>
+              )}
             </div>
           )}
         </div>
@@ -688,9 +782,29 @@ function VideoSession() {
                 {getConnectionStatusText()}
               </span>
             </div>
+
+            {/* Mobile tips */}
+            {isMobile && (
+              <div className="mobile-session-tips">
+                <h4>📱 Mobile Tips:</h4>
+                <ul>
+                  <li>Keep this page open</li>
+                  <li>Don't switch to the Jitsi app</li>
+                  <li>Use headphones for better audio</li>
+                  <li>Keep your device charged</li>
+                </ul>
+              </div>
+            )}
           </div>
         )}
       </div>
+
+      {/* Network status indicator */}
+      {networkStatus === 'offline' && (
+        <div className="network-status offline">
+          <span>📶 No internet connection</span>
+        </div>
+      )}
     </div>
   );
 }
