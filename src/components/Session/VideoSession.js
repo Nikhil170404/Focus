@@ -12,7 +12,9 @@ import {
   FiChevronUp,
   FiChevronDown,
   FiArrowLeft,
-  FiLoader
+  FiLoader,
+  FiWifi,
+  FiCheck
 } from 'react-icons/fi';
 import toast from 'react-hot-toast';
 
@@ -21,52 +23,33 @@ function VideoSession() {
   const { user } = useAuth();
   const navigate = useNavigate();
   
-  // Refs for managing component state and cleanup
+  // Core refs
   const jitsiContainerRef = useRef(null);
   const apiRef = useRef(null);
-  const scriptLoadedRef = useRef(false);
-  const initializationRef = useRef(false);
-  const sessionListenerRef = useRef(null);
   const mountedRef = useRef(true);
   const cleanupRef = useRef(false);
-  const localParticipantIdRef = useRef(null);
-  const participantsRef = useRef(new Set());
-  const reconnectTimeoutRef = useRef(null);
-  const heartbeatIntervalRef = useRef(null);
+  const sessionListenerRef = useRef(null);
+  const initializationAttemptedRef = useRef(false);
+  const participantCheckIntervalRef = useRef(null);
   
-  // Component state
+  // Simplified state management
   const [session, setSession] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
-  const [connectionStatus, setConnectionStatus] = useState('connecting');
-  const [partnerConnected, setPartnerConnected] = useState(false);
-  const [sessionActive, setSessionActive] = useState(false);
-  const [participantCount, setParticipantCount] = useState(1);
-  const [networkStatus, setNetworkStatus] = useState('online');
-  const [jitsiReady, setJitsiReady] = useState(false);
-  const [userRole, setUserRole] = useState(null);
-  const [jitsiConnected, setJitsiConnected] = useState(false);
-  const [reconnectAttempts, setReconnectAttempts] = useState(0);
-
-  // Emergency loading bypass - if stuck for too long
-  useEffect(() => {
-    const emergencyTimeout = setTimeout(() => {
-      if (loading && mountedRef.current) {
-        console.log('🚨 Emergency loading bypass activated');
-        setLoading(false);
-        setJitsiReady(true);
-      }
-    }, 3000); // 3 seconds maximum loading
-
-    return () => clearTimeout(emergencyTimeout);
-  }, []);
   
-  // Mobile responsive states
+  // Single connection state: 'loading', 'connecting', 'waiting-partner', 'connected', 'failed'
+  const [connectionState, setConnectionState] = useState('loading');
+  const [participantCount, setParticipantCount] = useState(0);
+  const [userRole, setUserRole] = useState(null);
+  const [networkOnline, setNetworkOnline] = useState(navigator.onLine);
+  const [jitsiReady, setJitsiReady] = useState(false);
+  
+  // UI states
   const [isMobile, setIsMobile] = useState(false);
   const [detailsExpanded, setDetailsExpanded] = useState(false);
   const [timerMinimized, setTimerMinimized] = useState(false);
 
-  // Check if device is mobile
+  // Check mobile and setup window listeners
   useEffect(() => {
     const checkMobile = () => {
       const mobile = window.innerWidth <= 768;
@@ -75,12 +58,22 @@ function VideoSession() {
       setDetailsExpanded(!mobile);
     };
     
+    const handleOnline = () => setNetworkOnline(true);
+    const handleOffline = () => setNetworkOnline(false);
+    
     checkMobile();
     window.addEventListener('resize', checkMobile);
-    return () => window.removeEventListener('resize', checkMobile);
+    window.addEventListener('online', handleOnline);
+    window.addEventListener('offline', handleOffline);
+    
+    return () => {
+      window.removeEventListener('resize', checkMobile);
+      window.removeEventListener('online', handleOnline);
+      window.removeEventListener('offline', handleOffline);
+    };
   }, []);
 
-  // Component mount/unmount tracking
+  // Component mount tracking
   useEffect(() => {
     mountedRef.current = true;
     cleanupRef.current = false;
@@ -90,98 +83,384 @@ function VideoSession() {
     };
   }, []);
 
-  // Network status monitoring
-  useEffect(() => {
-    const handleOnline = () => {
-      setNetworkStatus('online');
-      if (apiRef.current && !jitsiConnected) {
-        attemptReconnect();
-      }
-    };
-    const handleOffline = () => setNetworkStatus('offline');
-
-    window.addEventListener('online', handleOnline);
-    window.addEventListener('offline', handleOffline);
-
-    if (!navigator.onLine) handleOffline();
-
-    return () => {
-      window.removeEventListener('online', handleOnline);
-      window.removeEventListener('offline', handleOffline);
-    };
-  }, [jitsiConnected]);
-
-  // Cleanup timeouts on unmount
-  useEffect(() => {
-    return () => {
-      if (reconnectTimeoutRef.current) {
-        clearTimeout(reconnectTimeoutRef.current);
-      }
-      if (heartbeatIntervalRef.current) {
-        clearInterval(heartbeatIntervalRef.current);
-      }
-    };
-  }, []);
-
-  // Update connection status with debouncing
-  const updateConnectionStatus = useCallback(() => {
-    if (!mountedRef.current || cleanupRef.current) return;
-
-    const currentParticipants = participantsRef.current.size;
-    
-    if (!jitsiConnected) {
-      setConnectionStatus('connecting');
-      setPartnerConnected(false);
-      setSessionActive(false);
-      setParticipantCount(1);
+  // CRITICAL: Reliable participant count checking with multiple methods
+  const checkParticipantCount = useCallback(() => {
+    if (!apiRef.current || cleanupRef.current || !mountedRef.current || !jitsiReady) {
       return;
     }
 
-    if (currentParticipants >= 2) {
-      setConnectionStatus('connected');
-      setPartnerConnected(true);
-      setSessionActive(true);
-    } else {
-      setConnectionStatus('waiting');
-      setPartnerConnected(false);
-      setSessionActive(false);
-    }
-    
-    setParticipantCount(currentParticipants);
-  }, [jitsiConnected]);
+    try {
+      // Method 1: Use Jitsi's getNumberOfParticipants()
+      const currentCount = apiRef.current.getNumberOfParticipants();
+      
+      console.log('🔍 Checking participant count:', {
+        currentCount,
+        previousCount: participantCount,
+        connectionState,
+        jitsiReady
+      });
 
-  // Reconnection logic
-  const attemptReconnect = useCallback(() => {
-    if (cleanupRef.current || reconnectAttempts >= 3) return;
+      // Update participant count state
+      setParticipantCount(currentCount);
 
-    console.log(`🔄 Attempting reconnection ${reconnectAttempts + 1}/3`);
-    setReconnectAttempts(prev => prev + 1);
-
-    if (reconnectTimeoutRef.current) {
-      clearTimeout(reconnectTimeoutRef.current);
-    }
-
-    reconnectTimeoutRef.current = setTimeout(() => {
-      if (!cleanupRef.current && apiRef.current) {
-        try {
-          // Try to restart ICE
-          if (apiRef.current.executeCommand) {
-            apiRef.current.executeCommand('hangup');
-            setTimeout(() => {
-              if (!cleanupRef.current) {
-                window.location.reload();
-              }
-            }, 2000);
-          }
-        } catch (error) {
-          console.error('❌ Reconnection failed:', error);
-          if (reconnectAttempts >= 2) {
-            window.location.reload();
-          }
+      // Update connection state based on participant count
+      if (currentCount >= 2 && connectionState !== 'connected') {
+        console.log('✅ Both participants detected - Setting state to CONNECTED');
+        setConnectionState('connected');
+        
+        // Show success notification only once
+        if (connectionState === 'waiting-partner') {
+          toast.success('🎉 Partner connected! Session is now active!');
         }
+      } else if (currentCount === 1 && (connectionState === 'connected' || connectionState === 'waiting-partner')) {
+        console.log('⏳ Only one participant - Setting state to WAITING');
+        setConnectionState('waiting-partner');
+      } else if (currentCount === 0 && connectionState !== 'connecting') {
+        console.log('🔄 No participants - Checking connection');
+        setConnectionState('connecting');
       }
-    }, 3000 * (reconnectAttempts + 1)); // Progressive delay
-  }, [reconnectAttempts]);
+
+    } catch (error) {
+      console.error('❌ Error checking participant count:', error);
+    }
+  }, [participantCount, connectionState, jitsiReady]);
+
+  // Start participant count polling
+  const startParticipantPolling = useCallback(() => {
+    if (participantCheckIntervalRef.current) {
+      clearInterval(participantCheckIntervalRef.current);
+    }
+
+    // Check every 2 seconds for participant changes
+    participantCheckIntervalRef.current = setInterval(() => {
+      if (!cleanupRef.current && jitsiReady && apiRef.current) {
+        checkParticipantCount();
+      }
+    }, 2000);
+
+    console.log('📊 Started participant polling');
+  }, [checkParticipantCount, jitsiReady]);
+
+  // Stop participant polling
+  const stopParticipantPolling = useCallback(() => {
+    if (participantCheckIntervalRef.current) {
+      clearInterval(participantCheckIntervalRef.current);
+      participantCheckIntervalRef.current = null;
+      console.log('🛑 Stopped participant polling');
+    }
+  }, []);
+
+  // Simplified Jitsi initialization
+  const initializeJitsi = useCallback(async (sessionData) => {
+    if (initializationAttemptedRef.current || cleanupRef.current || !mountedRef.current) {
+      return;
+    }
+
+    initializationAttemptedRef.current = true;
+    setConnectionState('connecting');
+    
+    console.log('🚀 Initializing Jitsi Meet...');
+    
+    const roomName = `focusmate-${sessionId}`.replace(/[^a-zA-Z0-9-]/g, '');
+    
+    // Load Jitsi script if not available
+    if (!window.JitsiMeetExternalAPI) {
+      try {
+        await loadJitsiScript();
+      } catch (error) {
+        console.error('❌ Failed to load Jitsi script:', error);
+        setError('Failed to load video system. Please refresh the page.');
+        setConnectionState('failed');
+        return;
+      }
+    }
+
+    const options = {
+      roomName,
+      width: '100%',
+      height: '100%',
+      parentNode: jitsiContainerRef.current,
+      userInfo: {
+        displayName: user?.displayName || user?.email?.split('@')[0] || 'Student',
+        email: user?.email
+      },
+      configOverwrite: {
+        startWithAudioMuted: false,
+        startWithVideoMuted: false,
+        prejoinPageEnabled: false,
+        enableClosePage: false,
+        disableInviteFunctions: true,
+        enableWelcomePage: false,
+        requireDisplayName: false,
+        resolution: isMobile ? 360 : 720,
+        constraints: {
+          video: {
+            aspectRatio: 16 / 9,
+            height: { ideal: isMobile ? 360 : 720, max: isMobile ? 480 : 1080 },
+            frameRate: { ideal: 30, max: 30 }
+          },
+          audio: {
+            echoCancellation: true,
+            noiseSuppression: true,
+            autoGainControl: true
+          }
+        },
+        p2p: {
+          enabled: true,
+          preferH264: true
+        }
+      },
+      interfaceConfigOverwrite: {
+        MOBILE_APP_PROMO: false,
+        SHOW_JITSI_WATERMARK: false,
+        SHOW_BRAND_WATERMARK: false,
+        SHOW_POWERED_BY: false,
+        ENABLE_MOBILE_BROWSER: true,
+        HIDE_DEEP_LINKING_LOGO: true,
+        TOOLBAR_BUTTONS: isMobile ? 
+          ['microphone', 'camera', 'hangup'] :
+          ['microphone', 'camera', 'chat', 'hangup', 'settings'],
+        TOOLBAR_ALWAYS_VISIBLE: isMobile,
+        FILM_STRIP_MAX_HEIGHT: isMobile ? 80 : 120,
+        DISABLE_INVITE_FUNCTIONS: true
+      }
+    };
+
+    try {
+      console.log('🎯 Creating Jitsi API instance');
+      apiRef.current = new window.JitsiMeetExternalAPI('meet.jit.si', options);
+      setupJitsiEventListeners(sessionData);
+      
+    } catch (error) {
+      console.error('❌ Failed to create Jitsi API:', error);
+      setError('Failed to initialize video connection. Please refresh and try again.');
+      setConnectionState('failed');
+      setLoading(false);
+    }
+  }, [sessionId, user, isMobile]);
+
+  // Load Jitsi script promise
+  const loadJitsiScript = () => {
+    return new Promise((resolve, reject) => {
+      if (window.JitsiMeetExternalAPI) {
+        resolve();
+        return;
+      }
+
+      const script = document.createElement('script');
+      script.src = 'https://meet.jit.si/external_api.js';
+      script.async = true;
+      script.onload = () => {
+        console.log('✅ Jitsi script loaded');
+        resolve();
+      };
+      script.onerror = () => {
+        console.error('❌ Failed to load Jitsi script');
+        reject(new Error('Failed to load Jitsi script'));
+      };
+      document.body.appendChild(script);
+    });
+  };
+
+  // Setup Jitsi event listeners with improved participant tracking
+  const setupJitsiEventListeners = useCallback((sessionData) => {
+    if (!apiRef.current || cleanupRef.current) return;
+
+    console.log('🔗 Setting up Jitsi event listeners');
+
+    // Conference joined - user successfully joined
+    apiRef.current.on('videoConferenceJoined', (event) => {
+      if (!mountedRef.current || cleanupRef.current) return;
+      
+      console.log('✅ Conference joined:', event);
+      
+      setLoading(false);
+      setJitsiReady(true);
+      setConnectionState('waiting-partner');
+      
+      // Determine user role
+      if (sessionData.userId === user?.uid) {
+        setUserRole('creator');
+        toast.success('Session ready! Waiting for partner...');
+      } else {
+        setUserRole('joiner');
+        toast.success('Joined session successfully!');
+      }
+
+      // Start polling for participants after joining
+      setTimeout(() => {
+        if (!cleanupRef.current) {
+          startParticipantPolling();
+          // Initial check
+          checkParticipantCount();
+        }
+      }, 1000);
+    });
+
+    // Participant joined - someone else joined
+    apiRef.current.on('participantJoined', (participant) => {
+      if (!mountedRef.current || cleanupRef.current) return;
+      
+      console.log('👤 Participant joined event:', participant);
+      
+      // Immediate check after participant joins
+      setTimeout(() => {
+        if (!cleanupRef.current) {
+          checkParticipantCount();
+        }
+      }, 500);
+      
+      toast.success(`${participant.displayName || 'Study partner'} joined! 🎉`);
+    });
+
+    // Participant left
+    apiRef.current.on('participantLeft', (participant) => {
+      if (!mountedRef.current || cleanupRef.current) return;
+      
+      console.log('👤 Participant left event:', participant);
+      
+      // Immediate check after participant leaves
+      setTimeout(() => {
+        if (!cleanupRef.current) {
+          checkParticipantCount();
+        }
+      }, 500);
+      
+      toast(`${participant.displayName || 'Study partner'} left the session`);
+    });
+
+    // Conference left - user left
+    apiRef.current.on('videoConferenceLeft', () => {
+      if (!mountedRef.current || cleanupRef.current) return;
+      
+      console.log('📤 Left conference');
+      setConnectionState('waiting-partner');
+      setParticipantCount(0);
+      stopParticipantPolling();
+    });
+
+    // Connection failed
+    apiRef.current.on('connectionFailed', () => {
+      console.log('❌ Connection failed');
+      setConnectionState('failed');
+      setError('Connection failed. Please check your internet and try again.');
+      stopParticipantPolling();
+    });
+
+    // Ready to close
+    apiRef.current.on('readyToClose', () => {
+      console.log('🔚 Ready to close');
+      if (!cleanupRef.current) {
+        endSession();
+      }
+    });
+
+    // Error handling
+    apiRef.current.on('cameraError', (error) => {
+      console.error('📷 Camera error:', error);
+      toast.error('Camera access failed. Please check permissions.');
+    });
+
+    apiRef.current.on('micError', (error) => {
+      console.error('🎤 Microphone error:', error);
+      toast.error('Microphone access failed. Please check permissions.');
+    });
+
+  }, [user?.uid, startParticipantPolling, stopParticipantPolling, checkParticipantCount]);
+
+  // Session listener with better error handling
+  useEffect(() => {
+    if (!sessionId || !user?.uid) {
+      navigate('/dashboard');
+      return;
+    }
+
+    if (sessionListenerRef.current) return;
+
+    const unsubscribe = onSnapshot(
+      doc(db, 'sessions', sessionId),
+      (docSnap) => {
+        if (!mountedRef.current || cleanupRef.current) return;
+        
+        if (docSnap.exists()) {
+          const sessionData = { id: docSnap.id, ...docSnap.data() };
+          
+          // Check access permissions
+          if (sessionData.userId !== user.uid && sessionData.partnerId !== user.uid) {
+            setError('You do not have access to this session');
+            setLoading(false);
+            return;
+          }
+
+          // Check if session is ended
+          if (sessionData.status === 'completed' || sessionData.status === 'cancelled') {
+            setError('This session has ended');
+            setLoading(false);
+            return;
+          }
+          
+          setSession(sessionData);
+          
+          // Set user role
+          if (sessionData.userId === user.uid) {
+            setUserRole('creator');
+          } else if (sessionData.partnerId === user.uid) {
+            setUserRole('joiner');
+          }
+          
+          // Initialize Jitsi only once when container is ready and session is active
+          if (jitsiContainerRef.current && 
+              !initializationAttemptedRef.current && 
+              sessionData.status === 'scheduled') {
+            
+            setTimeout(() => {
+              if (mountedRef.current && !cleanupRef.current && !initializationAttemptedRef.current) {
+                initializeJitsi(sessionData);
+              }
+            }, 1000);
+          }
+        } else {
+          setError('Session not found');
+          setLoading(false);
+        }
+      },
+      (error) => {
+        if (!mountedRef.current || cleanupRef.current) return;
+        console.error('❌ Session listener error:', error);
+        setError('Failed to connect to session. Please refresh and try again.');
+        setLoading(false);
+      }
+    );
+
+    sessionListenerRef.current = unsubscribe;
+
+    return () => {
+      if (sessionListenerRef.current) {
+        sessionListenerRef.current();
+        sessionListenerRef.current = null;
+      }
+    };
+  }, [sessionId, user?.uid, navigate, initializeJitsi]);
+
+  // Cleanup on unmount
+  useEffect(() => {
+    return () => {
+      cleanupRef.current = true;
+      
+      stopParticipantPolling();
+      
+      if (apiRef.current) {
+        try {
+          apiRef.current.dispose();
+        } catch (e) {
+          console.log('Cleanup error:', e);
+        }
+        apiRef.current = null;
+      }
+      
+      initializationAttemptedRef.current = false;
+    };
+  }, [stopParticipantPolling]);
 
   // End session function
   const endSession = useCallback(async () => {
@@ -189,14 +468,8 @@ function VideoSession() {
     cleanupRef.current = true;
     
     try {
-      // Clear all intervals and timeouts
-      if (heartbeatIntervalRef.current) {
-        clearInterval(heartbeatIntervalRef.current);
-      }
-      if (reconnectTimeoutRef.current) {
-        clearTimeout(reconnectTimeoutRef.current);
-      }
-
+      stopParticipantPolling();
+      
       if (sessionId && session && session.status !== 'completed') {
         await updateDoc(doc(db, 'sessions', sessionId), {
           status: 'completed',
@@ -205,7 +478,6 @@ function VideoSession() {
         });
       }
 
-      // Clean up Jitsi
       if (apiRef.current) {
         try {
           apiRef.current.dispose();
@@ -221,13 +493,15 @@ function VideoSession() {
       console.error('Error ending session:', error);
       navigate('/dashboard');
     }
-  }, [sessionId, session, navigate]);
+  }, [sessionId, session, navigate, stopParticipantPolling]);
 
   // Cancel session function
   const cancelSession = useCallback(async () => {
     if (cleanupRef.current) return;
     
     try {
+      stopParticipantPolling();
+      
       if (sessionId) {
         await updateDoc(doc(db, 'sessions', sessionId), {
           status: 'cancelled',
@@ -235,7 +509,6 @@ function VideoSession() {
         });
       }
 
-      // Clean up Jitsi
       if (apiRef.current) {
         try {
           apiRef.current.dispose();
@@ -251,529 +524,7 @@ function VideoSession() {
       console.error('Error cancelling session:', error);
       navigate('/dashboard');
     }
-  }, [sessionId, navigate]);
-
-  // Initialize Jitsi Meet with better configuration
-  const initializeJitsi = useCallback(async (sessionData) => {
-    if (initializationRef.current || !mountedRef.current || cleanupRef.current || apiRef.current) {
-      return;
-    }
-
-    initializationRef.current = true;
-    console.log('🚀 Initializing Jitsi...');
-    
-    const roomName = `focusmate-${sessionId}`.replace(/[^a-zA-Z0-9-]/g, '');
-    const domain = 'meet.jit.si';
-    
-    const options = {
-      roomName: roomName,
-      width: '100%',
-      height: '100%',
-      parentNode: jitsiContainerRef.current,
-      userInfo: {
-        displayName: user?.displayName || user?.email?.split('@')[0] || 'Student',
-        email: user?.email
-      },
-      configOverwrite: {
-        // Core settings
-        startWithAudioMuted: false,
-        startWithVideoMuted: false,
-        prejoinPageEnabled: false,
-        
-        // CRITICAL: Remove demo limitations
-        enableClosePage: false,
-        disableInviteFunctions: true,
-        enableWelcomePage: false,
-        requireDisplayName: false,
-        
-        // Demo embedding fixes
-        enableInsecureRoomNameWarning: false,
-        enableLobbyChat: false,
-        enableNoAudioDetection: false,
-        enableNoisyMicDetection: false,
-        
-        // Force web mode - CRITICAL for mobile
-        disableDeepLinking: true,
-        disableProfile: true,
-        
-        // Performance optimizations
-        resolution: isMobile ? 360 : 720,
-        constraints: {
-          video: {
-            aspectRatio: 16 / 9,
-            height: { ideal: isMobile ? 360 : 720, max: isMobile ? 480 : 1080 },
-            width: { ideal: isMobile ? 640 : 1280, max: isMobile ? 854 : 1920 },
-            frameRate: { ideal: 30, max: 30 }
-          },
-          audio: {
-            echoCancellation: true,
-            noiseSuppression: true,
-            autoGainControl: true
-          }
-        },
-        
-        // Connection settings
-        enableLayerSuspension: true,
-        channelLastN: 2,
-        
-        // P2P settings for better performance
-        p2p: {
-          enabled: true,
-          stunServers: [
-            { urls: 'stun:stun.l.google.com:19302' },
-            { urls: 'stun:stun1.l.google.com:19302' },
-            { urls: 'stun:stun2.l.google.com:19302' }
-          ],
-          preferH264: true
-        },
-        
-        // Disable analytics and stats for performance
-        analytics: {
-          disabled: true
-        },
-        disableAudioLevels: false,
-        enableTalkWhileMuted: false,
-        
-        // Video settings
-        startVideoMuted: false,
-        startAudioMuted: false,
-        videoQuality: {
-          maxBitratesVideo: {
-            low: 200000,
-            standard: 500000,
-            high: 1500000
-          }
-        },
-        
-        // REMOVE DEMO RESTRICTIONS
-        hosts: {
-          domain: 'meet.jit.si',
-          muc: 'muc.meet.jit.si'
-        },
-        bosh: 'https://meet.jit.si/http-bind',
-        websocket: 'wss://meet.jit.si/xmpp-websocket',
-        
-        // Disable demo warnings
-        enableWelcomePage: false,
-        enableClosePage: false
-      },
-      interfaceConfigOverwrite: {
-        // CRITICAL: Remove all demo/branding limitations
-        MOBILE_APP_PROMO: false,
-        SHOW_JITSI_WATERMARK: false,
-        SHOW_BRAND_WATERMARK: false,
-        SHOW_POWERED_BY: false,
-        SHOW_PROMOTIONAL_CLOSE_PAGE: false,
-        SHOW_CHROME_EXTENSION_BANNER: false,
-        
-        // Custom branding to override demo mode
-        PROVIDER_NAME: 'FocusMate',
-        APP_NAME: 'FocusMate Study Session',
-        NATIVE_APP_NAME: 'FocusMate',
-        DEFAULT_BACKGROUND: '#1a1a1a',
-        
-        // Force web interface
-        ENABLE_MOBILE_BROWSER: true,
-        HIDE_DEEP_LINKING_LOGO: true,
-        
-        // Interface optimizations
-        DISABLE_FOCUS_INDICATOR: true,
-        DISABLE_PRESENCE_STATUS: true,
-        DISABLE_JOIN_LEAVE_NOTIFICATIONS: false,
-        
-        // Toolbar configuration
-        TOOLBAR_BUTTONS: isMobile ? 
-          ['microphone', 'camera', 'hangup'] :
-          ['microphone', 'camera', 'chat', 'hangup', 'settings'],
-        TOOLBAR_ALWAYS_VISIBLE: isMobile,
-        
-        // Layout settings
-        FILM_STRIP_MAX_HEIGHT: isMobile ? 80 : 120,
-        VIDEO_LAYOUT_FIT: 'both',
-        TILE_VIEW_MAX_COLUMNS: 2,
-        
-        // Remove demo limitations
-        DISABLE_INVITE_FUNCTIONS: true,
-        GENERATE_ROOMNAMES_ON_WELCOME_PAGE: false,
-        HIDE_INVITE_MORE_HEADER: true,
-        
-        // Connection and embedding
-        CONNECTION_INDICATOR_DISABLED: false,
-        DISABLE_RINGING: false,
-        ENABLE_DIAL_OUT: false,
-        ENABLE_FEEDBACK_ANIMATION: false,
-        
-        // Remove demo warnings and restrictions
-        DISPLAY_WELCOME_FOOTER: false,
-        DISPLAY_WELCOME_PAGE_CONTENT: false,
-        DISPLAY_WELCOME_PAGE_TOOLBAR_ADDITIONAL_CONTENT: false,
-        
-        // Override default domain restrictions
-        ENFORCE_NOTIFICATION_AUTO_DISMISS_TIMEOUT: 5000
-      }
-    };
-
-    const loadJitsiAndInitialize = () => {
-      if (!mountedRef.current || cleanupRef.current || apiRef.current) {
-        initializationRef.current = false;
-        return;
-      }
-
-      if (window.JitsiMeetExternalAPI) {
-        console.log('✅ Jitsi already available');
-        setLoading(false);
-        setJitsiReady(true);
-        setJitsiConnected(true);
-        setConnectionStatus('waiting');
-        createJitsiAPI();
-        return;
-      }
-
-      if (scriptLoadedRef.current) {
-        const checkInterval = setInterval(() => {
-          if (window.JitsiMeetExternalAPI) {
-            clearInterval(checkInterval);
-            if (!mountedRef.current || cleanupRef.current || apiRef.current) {
-              initializationRef.current = false;
-              return;
-            }
-            console.log('✅ Jitsi available after wait');
-            setLoading(false);
-            setJitsiReady(true);
-            setJitsiConnected(true);
-            setConnectionStatus('waiting');
-            createJitsiAPI();
-          }
-        }, 100);
-        
-        setTimeout(() => {
-          clearInterval(checkInterval);
-          if (mountedRef.current && !cleanupRef.current) {
-            // Force show interface even if Jitsi didn't load
-            setLoading(false);
-            setJitsiReady(true);
-            setJitsiConnected(true);
-            setConnectionStatus('waiting');
-          }
-        }, 5000);
-        return;
-      }
-
-      scriptLoadedRef.current = true;
-      
-      const script = document.createElement('script');
-      script.src = 'https://meet.jit.si/external_api.js';
-      script.async = true;
-      
-      script.onload = () => {
-        console.log('✅ Jitsi script loaded successfully');
-        if (!mountedRef.current || cleanupRef.current || apiRef.current) {
-          initializationRef.current = false;
-          return;
-        }
-        // Force loading to stop and create API
-        setLoading(false);
-        setJitsiReady(true);
-        setJitsiConnected(true);
-        setConnectionStatus('waiting');
-        createJitsiAPI();
-      };
-      
-      script.onerror = (error) => {
-        console.error('❌ Failed to load Jitsi script:', error);
-        initializationRef.current = false;
-        scriptLoadedRef.current = false;
-        if (mountedRef.current && !cleanupRef.current) {
-          // Even on script error, show the interface
-          setLoading(false);
-          setJitsiReady(true);
-          setJitsiConnected(true);
-          setConnectionStatus('waiting');
-          setError('Video system failed to load. Please refresh the page.');
-        }
-      };
-      
-      document.body.appendChild(script);
-    };
-
-    const createJitsiAPI = () => {
-      if (!mountedRef.current || cleanupRef.current || apiRef.current) {
-        initializationRef.current = false;
-        return;
-      }
-
-      try {
-        console.log('🎯 Creating Jitsi API instance');
-        apiRef.current = new window.JitsiMeetExternalAPI(domain, options);
-        setupEventListeners();
-        
-        // Set ready state faster
-        setTimeout(() => {
-          if (mountedRef.current && !cleanupRef.current) {
-            setLoading(false);
-            setJitsiReady(true);
-          }
-        }, 1500);
-        
-      } catch (error) {
-        console.error('❌ Failed to create Jitsi API:', error);
-        initializationRef.current = false;
-        if (mountedRef.current && !cleanupRef.current) {
-          setError('Failed to initialize video connection. Please refresh and try again.');
-          setLoading(false);
-        }
-      }
-    };
-
-    const setupEventListeners = () => {
-      if (!apiRef.current || !mountedRef.current || cleanupRef.current) return;
-
-      try {
-        console.log('🔗 Setting up Jitsi event listeners');
-        
-        // Participant events with throttling
-        let participantEventThrottle = false;
-        
-        apiRef.current.on('participantJoined', (participant) => {
-          if (!mountedRef.current || cleanupRef.current || participantEventThrottle) return;
-          
-          participantEventThrottle = true;
-          setTimeout(() => { participantEventThrottle = false; }, 1000);
-          
-          console.log('👤 Participant joined:', participant.displayName);
-          
-          participantsRef.current.add(participant.id);
-          updateConnectionStatus();
-          
-          if (participant.id !== localParticipantIdRef.current) {
-            toast.success(`${participant.displayName || 'Study partner'} joined! 🎉`);
-          }
-        });
-
-        apiRef.current.on('participantLeft', (participant) => {
-          if (!mountedRef.current || cleanupRef.current || participantEventThrottle) return;
-          
-          participantEventThrottle = true;
-          setTimeout(() => { participantEventThrottle = false; }, 1000);
-          
-          console.log('👤 Participant left:', participant.displayName);
-          
-          participantsRef.current.delete(participant.id);
-          updateConnectionStatus();
-          
-          if (participant.id !== localParticipantIdRef.current) {
-            toast(`${participant.displayName || 'Study partner'} left the session`);
-          }
-        });
-
-        apiRef.current.on('videoConferenceJoined', (conference) => {
-          if (!mountedRef.current || cleanupRef.current) return;
-          
-          console.log('🎯 Video conference joined successfully');
-          
-          localParticipantIdRef.current = conference.id;
-          participantsRef.current.add(conference.id);
-          
-          setJitsiConnected(true);
-          setError(null);
-          setLoading(false);
-          setJitsiReady(true);
-          setReconnectAttempts(0);
-          setConnectionStatus('waiting'); // Set to waiting, not connecting
-          
-          updateConnectionStatus();
-          
-          // Start heartbeat
-          if (heartbeatIntervalRef.current) {
-            clearInterval(heartbeatIntervalRef.current);
-          }
-          heartbeatIntervalRef.current = setInterval(() => {
-            if (apiRef.current && mountedRef.current) {
-              try {
-                // Simple ping to keep connection alive
-                const participantCount = apiRef.current.getNumberOfParticipants();
-                console.log('💓 Heartbeat - participants:', participantCount);
-              } catch (e) {
-                console.warn('Heartbeat failed:', e);
-              }
-            }
-          }, 30000);
-          
-          if (sessionData.userId === user?.uid) {
-            setUserRole('creator');
-            toast.success('Session ready! Waiting for partner...');
-          } else {
-            setUserRole('joiner');
-            toast.success('Joined session successfully!');
-          }
-        });
-
-        apiRef.current.on('videoConferenceLeft', () => {
-          if (!mountedRef.current || cleanupRef.current) return;
-          console.log('📤 Video conference left');
-          
-          setJitsiConnected(false);
-          participantsRef.current.clear();
-          
-          if (heartbeatIntervalRef.current) {
-            clearInterval(heartbeatIntervalRef.current);
-          }
-          
-          updateConnectionStatus();
-        });
-
-        // Connection failure handling
-        apiRef.current.on('connectionFailed', () => {
-          console.log('❌ Connection failed');
-          setJitsiConnected(false);
-          if (!cleanupRef.current) {
-            attemptReconnect();
-          }
-        });
-
-        apiRef.current.on('readyToClose', () => {
-          console.log('🔚 Jitsi ready to close');
-          if (!cleanupRef.current) {
-            endSession();
-          }
-        });
-
-      } catch (error) {
-        console.error('❌ Error setting up event listeners:', error);
-        setError('Failed to setup video connection');
-        setLoading(false);
-      }
-    };
-
-    loadJitsiAndInitialize();
-  }, [sessionId, user, isMobile, endSession, updateConnectionStatus, attemptReconnect]);
-
-  // Optimized session listener with debouncing
-  useEffect(() => {
-    if (!sessionId || !user?.uid) {
-      navigate('/dashboard');
-      return;
-    }
-
-    if (!mountedRef.current || cleanupRef.current || sessionListenerRef.current) {
-      return;
-    }
-
-    let updateTimeout;
-
-    try {
-      sessionListenerRef.current = onSnapshot(
-        doc(db, 'sessions', sessionId), 
-        (docSnap) => {
-          if (!mountedRef.current || cleanupRef.current) return;
-          
-          // Debounce updates to prevent excessive re-renders
-          if (updateTimeout) clearTimeout(updateTimeout);
-          updateTimeout = setTimeout(() => {
-            if (!mountedRef.current || cleanupRef.current) return;
-            
-            if (docSnap.exists()) {
-              const sessionData = { id: docSnap.id, ...docSnap.data() };
-              
-              // Check access permissions
-              if (sessionData.userId !== user.uid && sessionData.partnerId !== user.uid) {
-                setError('You do not have access to this session');
-                setLoading(false);
-                return;
-              }
-
-              // Don't initialize for ended sessions
-              if (sessionData.status === 'completed' || sessionData.status === 'cancelled') {
-                setError('This session has ended');
-                setLoading(false);
-                return;
-              }
-              
-              setSession(sessionData);
-              
-              // Force loading to clear early
-              if (loading) {
-                console.log('🚀 Session loaded, clearing loading state');
-                setLoading(false);
-              }
-              
-              // Set user role
-              if (sessionData.userId === user.uid) {
-                setUserRole('creator');
-              } else if (sessionData.partnerId === user.uid) {
-                setUserRole('joiner');
-              }
-              
-              // Initialize Jitsi only once
-              if (jitsiContainerRef.current && 
-                  !initializationRef.current && 
-                  !apiRef.current && 
-                  sessionData.status === 'scheduled') {
-                
-                setTimeout(() => {
-                  if (mountedRef.current && 
-                      !cleanupRef.current && 
-                      !initializationRef.current && 
-                      !apiRef.current) {
-                    initializeJitsi(sessionData);
-                  }
-                }, 500);
-              }
-            } else {
-              setError('Session not found');
-              setLoading(false);
-            }
-          }, 500); // 500ms debounce
-        },
-        (error) => {
-          if (!mountedRef.current || cleanupRef.current) return;
-          console.error('❌ Session listener error:', error);
-          setError('Connection error. Please refresh and try again.');
-          setLoading(false);
-        }
-      );
-    } catch (error) {
-      console.error('❌ Failed to setup session listener:', error);
-      setError('Failed to connect to session');
-      setLoading(false);
-    }
-
-    return () => {
-      if (updateTimeout) clearTimeout(updateTimeout);
-      if (sessionListenerRef.current) {
-        sessionListenerRef.current();
-        sessionListenerRef.current = null;
-      }
-    };
-  }, [sessionId, user?.uid, navigate, initializeJitsi]);
-
-  // Cleanup on unmount
-  useEffect(() => {
-    return () => {
-      cleanupRef.current = true;
-      
-      // Clear all timeouts and intervals
-      if (reconnectTimeoutRef.current) {
-        clearTimeout(reconnectTimeoutRef.current);
-      }
-      if (heartbeatIntervalRef.current) {
-        clearInterval(heartbeatIntervalRef.current);
-      }
-      
-      if (apiRef.current) {
-        try {
-          apiRef.current.dispose();
-        } catch (e) {
-          console.log('Cleanup error:', e);
-        }
-        apiRef.current = null;
-      }
-      
-      initializationRef.current = false;
-      scriptLoadedRef.current = false;
-      participantsRef.current.clear();
-    };
-  }, []);
+  }, [sessionId, navigate, stopParticipantPolling]);
 
   // Timer complete handler
   const onTimerComplete = useCallback(() => {
@@ -785,52 +536,61 @@ function VideoSession() {
     }, 2000);
   }, [endSession]);
 
+  // Helper functions
   const getConnectionStatusText = () => {
-    if (networkStatus === 'offline') return '📶 No internet';
+    if (!networkOnline) return '📶 No internet connection';
     
-    switch (connectionStatus) {
+    switch (connectionState) {
+      case 'loading':
+        return '⏳ Loading session...';
       case 'connecting':
-        return '🟡 Connecting...';
-      case 'waiting':
-        return userRole === 'creator' ? '⏳ Waiting for partner' : '⏳ Ready, waiting for partner';
+        return '🟡 Connecting to video...';
+      case 'waiting-partner':
+        return userRole === 'creator' ? '⏳ Waiting for partner to join' : '⏳ Waiting for partner';
       case 'connected':
-        return `🟢 Connected (${participantCount} ${participantCount === 1 ? 'person' : 'people'})`;
-      case 'disconnected':
-        return '🔴 Disconnected';
+        return `🟢 Connected (${participantCount} participants)`;
+      case 'failed':
+        return '🔴 Connection failed';
       default:
-        return '🟡 Connecting...';
+        return '🟡 Loading...';
     }
   };
 
   const getPartnerStatusText = () => {
-    if (!session) return 'Loading...';
+    if (!session) return 'Loading session...';
     
     if (!session.partnerId) {
-      return 'Waiting for partner...';
+      return 'No partner assigned yet';
     }
     
     const partnerName = session.partnerName || 'Study Partner';
+    const isPartnerConnected = connectionState === 'connected' && participantCount >= 2;
     
-    if (partnerConnected && sessionActive) {
-      return `${partnerName} (Connected)`;
-    } else {
-      return `${partnerName} (Connecting...)`;
-    }
+    return `${partnerName} ${isPartnerConnected ? '(Connected ✅)' : '(Not connected yet)'}`;
   };
 
   const shouldShowTimer = () => {
-    return sessionActive && partnerConnected && jitsiReady && jitsiConnected && session;
+    return connectionState === 'connected' && participantCount >= 2 && session;
   };
 
-  const getTimerConfig = () => {
-    if (!shouldShowTimer()) return null;
-    
-    return {
-      duration: session?.duration || 50,
-      autoStart: true,
-      onComplete: onTimerComplete
-    };
-  };
+  // Loading state - simplified
+  if (loading) {
+    return (
+      <div className="video-session-loading">
+        <div className="loading-container">
+          <FiLoader className="spinner" />
+          <h3>Setting up your focus session...</h3>
+          <p>Please wait while we prepare everything...</p>
+          
+          {isMobile && (
+            <div className="mobile-tips">
+              <p>💡 Keep this page open for the best experience</p>
+            </div>
+          )}
+        </div>
+      </div>
+    );
+  }
 
   // Error state
   if (error) {
@@ -838,7 +598,7 @@ function VideoSession() {
       <div className="video-session-error">
         <div className="error-container">
           <div className="error-icon">❌</div>
-          <h2>Connection Error</h2>
+          <h2>Session Error</h2>
           <p>{error}</p>
           <div className="error-actions">
             <button className="btn-primary" onClick={() => window.location.reload()}>
@@ -853,54 +613,6 @@ function VideoSession() {
     );
   }
 
-  // Manual override to dismiss stuck overlays
-  const dismissOverlay = () => {
-    console.log('👆 Manual overlay dismiss');
-    setJitsiReady(true);
-    setJitsiConnected(true);
-    setConnectionStatus('waiting');
-    setLoading(false);
-  };
-
-  // Force continue function for stuck loading
-  const forceContinue = () => {
-    console.log('🔄 Force continuing from loading state');
-    setLoading(false);
-    setJitsiReady(true);
-    setJitsiConnected(true);
-    setConnectionStatus('waiting');
-  };
-
-  // Loading state - simplified condition with escape hatch
-  if (loading) {
-    return (
-      <div className="video-session-loading">
-        <div className="loading-container">
-          <FiLoader className="spinner" />
-          <p>Setting up your focus session...</p>
-          <small>{isMobile ? 'Optimizing for mobile...' : 'Preparing video connection'}</small>
-          
-          {/* Show continue button after 8 seconds */}
-          <div className="loading-actions" style={{ marginTop: '20px' }}>
-            <button 
-              className="btn-secondary"
-              onClick={forceContinue}
-              style={{ opacity: 0.7, fontSize: '12px' }}
-            >
-              Continue Anyway
-            </button>
-          </div>
-          
-          {isMobile && (
-            <div className="mobile-tips">
-              <p>💡 Stay on this page - video will load soon</p>
-            </div>
-          )}
-        </div>
-      </div>
-    );
-  }
-
   return (
     <div className={`video-session ${isMobile ? 'mobile' : 'desktop'}`}>
       {/* Header */}
@@ -910,7 +622,7 @@ function VideoSession() {
             <h3>{session?.goal || 'Focus Session'}</h3>
             {userRole && (
               <span className={`role-badge ${userRole}`}>
-                {userRole === 'creator' ? '👑' : '🤝'}
+                {userRole === 'creator' ? '👑 Host' : '🤝 Participant'}
               </span>
             )}
           </div>
@@ -919,7 +631,8 @@ function VideoSession() {
             <span className="duration">
               <FiClock /> {session?.duration || 50}min
             </span>
-            <span className={`status ${connectionStatus}`}>
+            <span className={`connection-status ${connectionState}`}>
+              <FiWifi />
               {getConnectionStatusText()}
             </span>
             <span className="participants">
@@ -932,6 +645,7 @@ function VideoSession() {
           <button 
             onClick={userRole === 'creator' ? cancelSession : () => navigate('/dashboard')} 
             className="btn-end-session"
+            title={userRole === 'creator' ? 'End session for everyone' : 'Leave session'}
           >
             {userRole === 'creator' ? (
               <>
@@ -951,84 +665,88 @@ function VideoSession() {
       {/* Main Video Container */}
       <div className="video-main">
         <div ref={jitsiContainerRef} className="jitsi-container">
-          {/* Loading/Connecting overlay - only when actually connecting */}
-          {(!jitsiReady || !jitsiConnected || connectionStatus === 'connecting') && (
+          {/* Connection status overlay - only show when actually needed */}
+          {connectionState === 'connecting' && (
             <div className="video-overlay">
               <FiLoader className="spinner" />
-              <p>Connecting to video...</p>
-              {reconnectAttempts > 0 && (
-                <small>Reconnection attempt {reconnectAttempts}/3</small>
-              )}
-              
-              {/* Dismiss button for stuck overlays */}
-              <button 
-                className="dismiss-overlay-btn"
-                onClick={dismissOverlay}
-                style={{
-                  marginTop: '20px',
-                  padding: '8px 16px',
-                  background: 'rgba(255, 255, 255, 0.1)',
-                  border: '1px solid rgba(255, 255, 255, 0.2)',
-                  borderRadius: '4px',
-                  color: 'white',
-                  fontSize: '12px',
-                  cursor: 'pointer'
-                }}
-              >
-                Continue Without Video
-              </button>
+              <h3>Connecting to video system...</h3>
+              <p>Please wait while we establish the connection</p>
             </div>
           )}
           
-          {/* Waiting for partner overlay - only when connected but no partner */}
-          {jitsiReady && jitsiConnected && connectionStatus === 'waiting' && participantCount < 2 && (
+          {/* Waiting for partner overlay - only when truly waiting */}
+          {connectionState === 'waiting-partner' && jitsiReady && (
             <div className="video-overlay">
               <FiUsers className="waiting-icon" />
-              <p>Waiting for study partner</p>
-              <div className="waiting-dots">
-                <span></span><span></span><span></span>
+              <h3>Waiting for study partner</h3>
+              <div className="waiting-animation">
+                <div className="pulse-dot"></div>
+                <div className="pulse-dot"></div>
+                <div className="pulse-dot"></div>
               </div>
-              <small>Share this session link with someone</small>
+              <p>
+                {userRole === 'creator' 
+                  ? 'Share this session with your study partner' 
+                  : 'The session creator will join soon'
+                }
+              </p>
+              <small>Participants: {participantCount}/2</small>
+            </div>
+          )}
+
+          {/* Connection failed overlay */}
+          {connectionState === 'failed' && (
+            <div className="video-overlay">
+              <div className="error-icon">⚠️</div>
+              <h3>Connection Failed</h3>
+              <p>Unable to connect to the video system</p>
+              <button 
+                className="btn-primary"
+                onClick={() => window.location.reload()}
+              >
+                Retry Connection
+              </button>
+            </div>
+          )}
+
+          {/* Success indicator when connected */}
+          {connectionState === 'connected' && (
+            <div className="connection-success-indicator">
+              <FiCheck className="success-icon" />
+              <span>Connected with {participantCount} participants</span>
             </div>
           )}
         </div>
 
-        {/* Session Timer */}
-        {(() => {
-          const timerConfig = getTimerConfig();
-          if (!timerConfig) return null;
-          
-          return (
-            <div className={`session-timer-overlay ${timerMinimized ? 'minimized' : ''}`}>
-              {isMobile && (
-                <button 
-                  className="timer-toggle"
-                  onClick={() => setTimerMinimized(!timerMinimized)}
-                >
-                  {timerMinimized ? <FiChevronUp /> : <FiChevronDown />}
-                </button>
-              )}
-              
-              {!timerMinimized && (
-                <SessionTimer 
-                  duration={timerConfig.duration}
-                  onComplete={timerConfig.onComplete}
-                  autoStart={timerConfig.autoStart}
-                  showBreakReminder={false}
-                  isOverlay={true}
-                  isMobile={isMobile}
-                />
-              )}
-              
-              {timerMinimized && (
-                <div className="timer-minimized">
-                  <FiClock />
-                  <span>Timer Active</span>
-                </div>
-              )}
-            </div>
-          );
-        })()}
+        {/* Session Timer Overlay - only when both participants are connected */}
+        {shouldShowTimer() && (
+          <div className={`session-timer-overlay ${timerMinimized ? 'minimized' : ''}`}>
+            {isMobile && (
+              <button 
+                className="timer-toggle"
+                onClick={() => setTimerMinimized(!timerMinimized)}
+              >
+                {timerMinimized ? <FiChevronUp /> : <FiChevronDown />}
+              </button>
+            )}
+            
+            {!timerMinimized ? (
+              <SessionTimer 
+                duration={session.duration}
+                onComplete={onTimerComplete}
+                autoStart={true}
+                showBreakReminder={false}
+                isOverlay={true}
+                isMobile={isMobile}
+              />
+            ) : (
+              <div className="timer-minimized">
+                <FiClock />
+                <span>Timer Active</span>
+              </div>
+            )}
+          </div>
+        )}
       </div>
 
       {/* Session Details Panel */}
@@ -1051,73 +769,59 @@ function VideoSession() {
             </div>
             
             <div className="detail-row">
-              <span className="label">Role:</span>
+              <span className="label">Your Role:</span>
               <span className={`value role-${userRole}`}>
-                {userRole === 'creator' ? '👑 Session Creator' : '🤝 Study Partner'}
+                {userRole === 'creator' ? '👑 Session Host' : '🤝 Participant'}
               </span>
             </div>
             
             <div className="detail-row">
               <span className="label">Partner:</span>
-              <span className={`value ${partnerConnected ? 'connected' : 'waiting'}`}>
+              <span className="value">
                 {getPartnerStatusText()}
               </span>
             </div>
             
             <div className="detail-row">
-              <span className="label">Duration:</span>
-              <span className="value">{session?.duration || 50} minutes</span>
-            </div>
-            
-            <div className="detail-row">
-              <span className="label">Status:</span>
-              <span className={`value status-${connectionStatus}`}>
+              <span className="label">Connection:</span>
+              <span className={`value status-${connectionState}`}>
                 {getConnectionStatusText()}
               </span>
             </div>
 
             <div className="detail-row">
+              <span className="label">Participants:</span>
+              <span className="value">{participantCount}/2 connected</span>
+            </div>
+
+            <div className="detail-row">
               <span className="label">Timer:</span>
               <span className="value">
-                {shouldShowTimer() ? '🟢 Active' : '⏸️ Waiting for all participants'}
+                {shouldShowTimer() ? '🟢 Active and running' : '⏸️ Waiting for both participants'}
               </span>
             </div>
 
-            {/* Connection quality indicator */}
             <div className="detail-row">
-              <span className="label">Connection:</span>
-              <span className="value">
-                {networkStatus === 'offline' ? '📶 Offline' : 
-                 jitsiConnected ? '🟢 Strong' : '🟡 Connecting'}
-              </span>
+              <span className="label">Duration:</span>
+              <span className="value">{session?.duration || 50} minutes</span>
             </div>
 
-            {/* Mobile tips */}
-            {isMobile && (
-              <div className="mobile-session-tips">
-                <h4>📱 Tips:</h4>
-                <ul>
-                  <li>Keep this page open</li>
-                  <li>Use headphones for better audio</li>
-                  <li>Ensure stable internet connection</li>
-                </ul>
+            {/* Network status */}
+            {!networkOnline && (
+              <div className="detail-row error">
+                <span className="label">Network:</span>
+                <span className="value">📶 Offline - Check your connection</span>
               </div>
             )}
           </div>
         )}
       </div>
 
-      {/* Network status indicator */}
-      {networkStatus === 'offline' && (
-        <div className="network-status offline">
-          <span>📶 No internet - please check your connection</span>
-        </div>
-      )}
-
-      {/* Reconnection indicator */}
-      {reconnectAttempts > 0 && networkStatus === 'online' && (
-        <div className="network-status reconnecting">
-          <span>🔄 Reconnecting... ({reconnectAttempts}/3)</span>
+      {/* Network status bar */}
+      {!networkOnline && (
+        <div className="network-status-bar offline">
+          <FiWifi className="icon" />
+          <span>No internet connection - Please check your network</span>
         </div>
       )}
     </div>
