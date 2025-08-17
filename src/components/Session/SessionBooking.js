@@ -253,7 +253,8 @@ function SessionBooking() {
         
         if (result.success) {
           toast.success(`🎉 Quick match found! Joined ${result.partnerName}'s session!`);
-          navigate(`/session/${sessionDoc.id}`);
+          // Navigate to dashboard instead of directly to session
+          navigate('/dashboard');
           return;
         }
       }
@@ -283,8 +284,9 @@ function SessionBooking() {
       const result = await createSession(sessionData);
       
       if (result.success) {
-        toast.success(`📚 Session created for ${nextSlot.time}! Waiting for a partner to join.`);
-        navigate(`/session/${result.sessionId}`);
+        toast.success(`📚 Session created for ${nextSlot.time}! Check your dashboard to join when ready.`);
+        // Navigate to dashboard instead of directly to session
+        navigate('/dashboard');
       }
       
     } catch (error) {
@@ -398,8 +400,9 @@ function SessionBooking() {
       const result = await createSession(sessionData);
       
       if (result.success) {
-        toast.success('📚 Session created! Others can now join your session.');
-        navigate(`/session/${result.sessionId}`);
+        toast.success('📚 Session created! Check your dashboard to join when it\'s time.');
+        // Navigate to dashboard instead of directly to session
+        navigate('/dashboard');
       }
     } catch (error) {
       console.error('Error creating session:', error);
@@ -424,8 +427,9 @@ function SessionBooking() {
       const result = await joinSession(sessionId, creatorName);
       
       if (result.success) {
-        toast.success(`🤝 Joined ${creatorName}'s session!`);
-        navigate(`/session/${result.sessionId}`);
+        toast.success(`🤝 Joined ${creatorName}'s session! Check your dashboard.`);
+        // Navigate to dashboard instead of directly to session
+        navigate('/dashboard');
       }
     } catch (error) {
       console.error('Error joining session:', error);
