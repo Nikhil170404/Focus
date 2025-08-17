@@ -47,6 +47,19 @@ function VideoSession() {
   const [userRole, setUserRole] = useState(null);
   const [jitsiConnected, setJitsiConnected] = useState(false);
   const [reconnectAttempts, setReconnectAttempts] = useState(0);
+
+  // Emergency loading bypass - if stuck for too long
+  useEffect(() => {
+    const emergencyTimeout = setTimeout(() => {
+      if (loading && mountedRef.current) {
+        console.log('🚨 Emergency loading bypass activated');
+        setLoading(false);
+        setJitsiReady(true);
+      }
+    }, 3000); // 3 seconds maximum loading
+
+    return () => clearTimeout(emergencyTimeout);
+  }, []);
   
   // Mobile responsive states
   const [isMobile, setIsMobile] = useState(false);
@@ -379,6 +392,9 @@ function VideoSession() {
       }
 
       if (window.JitsiMeetExternalAPI) {
+        console.log('✅ Jitsi already available');
+        setLoading(false);
+        setJitsiReady(true);
         createJitsiAPI();
         return;
       }
@@ -391,11 +407,21 @@ function VideoSession() {
               initializationRef.current = false;
               return;
             }
+            console.log('✅ Jitsi available after wait');
+            setLoading(false);
+            setJitsiReady(true);
             createJitsiAPI();
           }
         }, 100);
         
-        setTimeout(() => clearInterval(checkInterval), 10000);
+        setTimeout(() => {
+          clearInterval(checkInterval);
+          if (mountedRef.current && !cleanupRef.current) {
+            // Force show interface even if Jitsi didn't load
+            setLoading(false);
+            setJitsiReady(true);
+          }
+        }, 5000);
         return;
       }
 
@@ -406,11 +432,14 @@ function VideoSession() {
       script.async = true;
       
       script.onload = () => {
-        console.log('✅ Jitsi script loaded');
+        console.log('✅ Jitsi script loaded successfully');
         if (!mountedRef.current || cleanupRef.current || apiRef.current) {
           initializationRef.current = false;
           return;
         }
+        // Force loading to stop and create API
+        setLoading(false);
+        setJitsiReady(true);
         createJitsiAPI();
       };
       
@@ -419,8 +448,10 @@ function VideoSession() {
         initializationRef.current = false;
         scriptLoadedRef.current = false;
         if (mountedRef.current && !cleanupRef.current) {
-          setError('Failed to load video system. Please refresh and try again.');
+          // Even on script error, show the interface
           setLoading(false);
+          setJitsiReady(true);
+          setError('Video system failed to load. Please refresh the page.');
         }
       };
       
@@ -621,6 +652,12 @@ function VideoSession() {
               
               setSession(sessionData);
               
+              // Force loading to clear early
+              if (loading) {
+                console.log('🚀 Session loaded, clearing loading state');
+                setLoading(false);
+              }
+              
               // Set user role
               if (sessionData.userId === user.uid) {
                 setUserRole('creator');
@@ -777,14 +814,34 @@ function VideoSession() {
     );
   }
 
-  // Loading state
-  if (loading && !jitsiReady) {
+  // Force continue function for stuck loading
+  const forceContinue = () => {
+    console.log('🔄 Force continuing from loading state');
+    setLoading(false);
+    setJitsiReady(true);
+    setConnectionStatus('waiting');
+  };
+
+  // Loading state - simplified condition with escape hatch
+  if (loading) {
     return (
       <div className="video-session-loading">
         <div className="loading-container">
           <FiLoader className="spinner" />
           <p>Setting up your focus session...</p>
           <small>{isMobile ? 'Optimizing for mobile...' : 'Preparing video connection'}</small>
+          
+          {/* Show continue button after 8 seconds */}
+          <div className="loading-actions" style={{ marginTop: '20px' }}>
+            <button 
+              className="btn-secondary"
+              onClick={forceContinue}
+              style={{ opacity: 0.7, fontSize: '12px' }}
+            >
+              Continue Anyway
+            </button>
+          </div>
+          
           {isMobile && (
             <div className="mobile-tips">
               <p>💡 Stay on this page - video will load soon</p>
