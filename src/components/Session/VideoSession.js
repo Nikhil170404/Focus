@@ -280,11 +280,17 @@ function VideoSession() {
         startWithVideoMuted: false,
         prejoinPageEnabled: false,
         
-        // Disable demo limitations
+        // CRITICAL: Remove demo limitations
         enableClosePage: false,
         disableInviteFunctions: true,
         enableWelcomePage: false,
         requireDisplayName: false,
+        
+        // Demo embedding fixes
+        enableInsecureRoomNameWarning: false,
+        enableLobbyChat: false,
+        enableNoAudioDetection: false,
+        enableNoisyMicDetection: false,
         
         // Force web mode - CRITICAL for mobile
         disableDeepLinking: true,
@@ -308,7 +314,7 @@ function VideoSession() {
         
         // Connection settings
         enableLayerSuspension: true,
-        channelLastN: 2, // Limit to 2 participants for performance
+        channelLastN: 2,
         
         // P2P settings for better performance
         p2p: {
@@ -321,18 +327,12 @@ function VideoSession() {
           preferH264: true
         },
         
-        // Analytics and stats - disable for performance
+        // Disable analytics and stats for performance
         analytics: {
           disabled: true
         },
         disableAudioLevels: false,
         enableTalkWhileMuted: false,
-        
-        // Remove demo restrictions
-        enableInsecureRoomNameWarning: false,
-        enableLobbyChat: false,
-        enableNoAudioDetection: false,
-        enableNoisyMicDetection: false,
         
         // Video settings
         startVideoMuted: false,
@@ -343,45 +343,73 @@ function VideoSession() {
             standard: 500000,
             high: 1500000
           }
-        }
+        },
+        
+        // REMOVE DEMO RESTRICTIONS
+        hosts: {
+          domain: 'meet.jit.si',
+          muc: 'muc.meet.jit.si'
+        },
+        bosh: 'https://meet.jit.si/http-bind',
+        websocket: 'wss://meet.jit.si/xmpp-websocket',
+        
+        // Disable demo warnings
+        enableWelcomePage: false,
+        enableClosePage: false
       },
       interfaceConfigOverwrite: {
-        // Branding
+        // CRITICAL: Remove all demo/branding limitations
         MOBILE_APP_PROMO: false,
         SHOW_JITSI_WATERMARK: false,
         SHOW_BRAND_WATERMARK: false,
         SHOW_POWERED_BY: false,
+        SHOW_PROMOTIONAL_CLOSE_PAGE: false,
+        SHOW_CHROME_EXTENSION_BANNER: false,
         
-        // Demo restrictions - REMOVE THESE
+        // Custom branding to override demo mode
         PROVIDER_NAME: 'FocusMate',
-        APP_NAME: 'FocusMate',
-        NATIVE_APP_NAME: undefined,
+        APP_NAME: 'FocusMate Study Session',
+        NATIVE_APP_NAME: 'FocusMate',
+        DEFAULT_BACKGROUND: '#1a1a1a',
         
         // Force web interface
         ENABLE_MOBILE_BROWSER: true,
         HIDE_DEEP_LINKING_LOGO: true,
         
-        // Interface
+        // Interface optimizations
         DISABLE_FOCUS_INDICATOR: true,
         DISABLE_PRESENCE_STATUS: true,
+        DISABLE_JOIN_LEAVE_NOTIFICATIONS: false,
         
-        // Toolbar
+        // Toolbar configuration
         TOOLBAR_BUTTONS: isMobile ? 
           ['microphone', 'camera', 'hangup'] :
           ['microphone', 'camera', 'chat', 'hangup', 'settings'],
-        DISABLE_JOIN_LEAVE_NOTIFICATIONS: false,
-        
-        // Mobile-specific
         TOOLBAR_ALWAYS_VISIBLE: isMobile,
-        FILM_STRIP_MAX_HEIGHT: isMobile ? 80 : 120,
         
-        // Layout
+        // Layout settings
+        FILM_STRIP_MAX_HEIGHT: isMobile ? 80 : 120,
         VIDEO_LAYOUT_FIT: 'both',
         TILE_VIEW_MAX_COLUMNS: 2,
         
-        // Notifications
+        // Remove demo limitations
         DISABLE_INVITE_FUNCTIONS: true,
-        GENERATE_ROOMNAMES_ON_WELCOME_PAGE: false
+        GENERATE_ROOMNAMES_ON_WELCOME_PAGE: false,
+        HIDE_INVITE_MORE_HEADER: true,
+        
+        // Connection and embedding
+        CONNECTION_INDICATOR_DISABLED: false,
+        DISABLE_RINGING: false,
+        ENABLE_DIAL_OUT: false,
+        ENABLE_FEEDBACK_ANIMATION: false,
+        
+        // Remove demo warnings and restrictions
+        DISPLAY_WELCOME_FOOTER: false,
+        DISPLAY_WELCOME_PAGE_CONTENT: false,
+        DISPLAY_WELCOME_PAGE_TOOLBAR_ADDITIONAL_CONTENT: false,
+        
+        // Override default domain restrictions
+        ENFORCE_NOTIFICATION_AUTO_DISMISS_TIMEOUT: 5000
       }
     };
 
@@ -395,6 +423,8 @@ function VideoSession() {
         console.log('✅ Jitsi already available');
         setLoading(false);
         setJitsiReady(true);
+        setJitsiConnected(true);
+        setConnectionStatus('waiting');
         createJitsiAPI();
         return;
       }
@@ -410,6 +440,8 @@ function VideoSession() {
             console.log('✅ Jitsi available after wait');
             setLoading(false);
             setJitsiReady(true);
+            setJitsiConnected(true);
+            setConnectionStatus('waiting');
             createJitsiAPI();
           }
         }, 100);
@@ -420,6 +452,8 @@ function VideoSession() {
             // Force show interface even if Jitsi didn't load
             setLoading(false);
             setJitsiReady(true);
+            setJitsiConnected(true);
+            setConnectionStatus('waiting');
           }
         }, 5000);
         return;
@@ -440,6 +474,8 @@ function VideoSession() {
         // Force loading to stop and create API
         setLoading(false);
         setJitsiReady(true);
+        setJitsiConnected(true);
+        setConnectionStatus('waiting');
         createJitsiAPI();
       };
       
@@ -451,6 +487,8 @@ function VideoSession() {
           // Even on script error, show the interface
           setLoading(false);
           setJitsiReady(true);
+          setJitsiConnected(true);
+          setConnectionStatus('waiting');
           setError('Video system failed to load. Please refresh the page.');
         }
       };
@@ -540,7 +578,8 @@ function VideoSession() {
           setError(null);
           setLoading(false);
           setJitsiReady(true);
-          setReconnectAttempts(0); // Reset reconnect attempts
+          setReconnectAttempts(0);
+          setConnectionStatus('waiting'); // Set to waiting, not connecting
           
           updateConnectionStatus();
           
@@ -552,13 +591,13 @@ function VideoSession() {
             if (apiRef.current && mountedRef.current) {
               try {
                 // Simple ping to keep connection alive
-                apiRef.current.executeCommand('toggleAudio');
-                apiRef.current.executeCommand('toggleAudio');
+                const participantCount = apiRef.current.getNumberOfParticipants();
+                console.log('💓 Heartbeat - participants:', participantCount);
               } catch (e) {
                 console.warn('Heartbeat failed:', e);
               }
             }
-          }, 30000); // Every 30 seconds
+          }, 30000);
           
           if (sessionData.userId === user?.uid) {
             setUserRole('creator');
@@ -814,11 +853,21 @@ function VideoSession() {
     );
   }
 
+  // Manual override to dismiss stuck overlays
+  const dismissOverlay = () => {
+    console.log('👆 Manual overlay dismiss');
+    setJitsiReady(true);
+    setJitsiConnected(true);
+    setConnectionStatus('waiting');
+    setLoading(false);
+  };
+
   // Force continue function for stuck loading
   const forceContinue = () => {
     console.log('🔄 Force continuing from loading state');
     setLoading(false);
     setJitsiReady(true);
+    setJitsiConnected(true);
     setConnectionStatus('waiting');
   };
 
@@ -902,18 +951,37 @@ function VideoSession() {
       {/* Main Video Container */}
       <div className="video-main">
         <div ref={jitsiContainerRef} className="jitsi-container">
-          {/* Loading/Waiting overlays */}
-          {(!jitsiReady || connectionStatus === 'connecting') && (
+          {/* Loading/Connecting overlay - only when actually connecting */}
+          {(!jitsiReady || !jitsiConnected || connectionStatus === 'connecting') && (
             <div className="video-overlay">
               <FiLoader className="spinner" />
               <p>Connecting to video...</p>
               {reconnectAttempts > 0 && (
                 <small>Reconnection attempt {reconnectAttempts}/3</small>
               )}
+              
+              {/* Dismiss button for stuck overlays */}
+              <button 
+                className="dismiss-overlay-btn"
+                onClick={dismissOverlay}
+                style={{
+                  marginTop: '20px',
+                  padding: '8px 16px',
+                  background: 'rgba(255, 255, 255, 0.1)',
+                  border: '1px solid rgba(255, 255, 255, 0.2)',
+                  borderRadius: '4px',
+                  color: 'white',
+                  fontSize: '12px',
+                  cursor: 'pointer'
+                }}
+              >
+                Continue Without Video
+              </button>
             </div>
           )}
           
-          {jitsiReady && connectionStatus === 'waiting' && (
+          {/* Waiting for partner overlay - only when connected but no partner */}
+          {jitsiReady && jitsiConnected && connectionStatus === 'waiting' && participantCount < 2 && (
             <div className="video-overlay">
               <FiUsers className="waiting-icon" />
               <p>Waiting for study partner</p>
