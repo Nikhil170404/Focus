@@ -26,14 +26,14 @@ import { getStorage, connectStorageEmulator } from "firebase/storage";
 
 // Firebase configuration
 const firebaseConfig = {
-  apiKey: "AIzaSyDJcxjc6EBUcHp1_i-4y9y1fzwau87WYKA",
-  authDomain: "focusmate-a3549.firebaseapp.com",
-  projectId: "focusmate-a3549",
-  storageBucket: "focusmate-a3549.firebasestorage.app",
-  messagingSenderId: "124148931192",
-  appId: "1:124148931192:web:4097010fc5bae09b4f2b8d",
-  measurementId: "G-D3S31NJG4Y",
-  databaseURL: "https://focusmate-a3549-default-rtdb.firebaseio.com"
+   apiKey: "AIzaSyA6AfHXBagGQVRiPpx3rygTyrOktQzlT68",
+  authDomain: "focus-53464.firebaseapp.com",
+  projectId: "focus-53464",
+  storageBucket: "focus-53464.firebasestorage.app",
+  messagingSenderId: "668910699641",
+  appId: "1:668910699641:web:2ed9b1d23bccc82ec680a8",
+  measurementId: "G-SXG1M21SEN",
+  databaseURL: "https://focus-53464-default-rtdb.asia-southeast1.firebasedatabase.app/"
 };
 
 // Initialize Firebase with error handling

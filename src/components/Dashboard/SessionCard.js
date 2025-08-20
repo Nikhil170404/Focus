@@ -1,6 +1,7 @@
 import React, { useMemo, useCallback, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { format, formatDistanceToNow, isToday, isTomorrow, isYesterday } from 'date-fns';
+import { useAuth } from '../../hooks/useAuth';
 import { 
   FiClock, 
   FiUser, 
@@ -22,7 +23,7 @@ const SESSION_STATUS = {
     icon: FiClock,
     label: 'Scheduled',
     color: '#6366f1',
-    canJoin: false
+    canJoin: true // CHANGED: Always allow joining scheduled sessions
   },
   active: {
     icon: FiPlay,
@@ -68,6 +69,7 @@ const PARTNER_STATUS = {
 
 function SessionCard({ session, completed = false, compact = false, showActions = true }) {
   const navigate = useNavigate();
+  const { user } = useAuth(); // Add useAuth hook
   const [showJoinModal, setShowJoinModal] = useState(false);
 
   // Memoized calculations for performance
@@ -126,50 +128,75 @@ function SessionCard({ session, completed = false, compact = false, showActions 
     }
   }, [sessionTime, completed]);
 
-  // Partner status
-  const partnerStatus = useMemo(() => {
+  // Partner status - FIXED to show correct partner info
+  const partnerInfo = useMemo(() => {
     if (!session?.partnerId) {
-      return PARTNER_STATUS.waiting;
+      return {
+        hasPartner: false,
+        name: 'Waiting for partner',
+        photo: null,
+        status: PARTNER_STATUS.waiting
+      };
     }
     
-    // Could add online status check here if available
-    return PARTNER_STATUS.confirmed;
-  }, [session?.partnerId]);
+    // Determine who the partner is based on current user
+    const isCurrentUserCreator = session.userId === user?.uid;
+    const isCurrentUserPartner = session.partnerId === user?.uid;
+    
+    if (isCurrentUserCreator) {
+      // Current user is creator, show partner info
+      return {
+        hasPartner: true,
+        name: session.partnerName || 'Study Partner',
+        photo: session.partnerPhoto,
+        status: PARTNER_STATUS.confirmed
+      };
+    } else if (isCurrentUserPartner) {
+      // Current user is partner, show creator info  
+      return {
+        hasPartner: true,
+        name: session.userName || 'Study Partner',
+        photo: session.userPhoto,
+        status: PARTNER_STATUS.confirmed
+      };
+    } else {
+      // Current user is neither creator nor partner (shouldn't happen)
+      return {
+        hasPartner: true,
+        name: 'Study Partner',
+        photo: null,
+        status: PARTNER_STATUS.confirmed
+      };
+    }
+  }, [session?.partnerId, session?.partnerName, session?.partnerPhoto, session?.userName, session?.userPhoto, session?.userId, user?.uid]);
+
+  // Legacy partner status for backward compatibility
+  const partnerStatus = partnerInfo.status;
 
   // Session status
   const sessionStatus = useMemo(() => {
     return SESSION_STATUS[session?.status] || SESSION_STATUS.scheduled;
   }, [session?.status]);
 
-  // Check if session can be joined
+  // SIMPLIFIED: Always allow joining scheduled sessions
   const canJoin = useMemo(() => {
-    if (completed || !sessionTime) return false;
-    
-    const now = new Date();
-    const sessionStart = new Date(sessionTime);
-    const timeDiff = sessionStart - now;
-    
-    // Can join 5 minutes early to 15 minutes late
-    return timeDiff >= -15 * 60 * 1000 && timeDiff <= 5 * 60 * 1000;
-  }, [sessionTime, completed]);
+    if (completed) return false;
+    return session?.status === 'scheduled' || session?.status === 'active';
+  }, [session?.status, completed]);
 
-  // Get time status
+  // Get time status - SIMPLIFIED
   const getTimeStatus = useMemo(() => {
     if (!sessionTime || completed) return null;
     
     const now = new Date();
     const timeDiff = sessionTime - now;
     
-    if (timeDiff > 5 * 60 * 1000) {
-      return { type: 'upcoming', message: `Starts ${timeUntilStart}` };
-    } else if (timeDiff >= -5 * 60 * 1000) {
+    if (timeDiff > 0) {
       return { type: 'ready', message: 'Ready to join!' };
-    } else if (timeDiff >= -15 * 60 * 1000) {
-      return { type: 'late', message: 'Session in progress' };
     } else {
-      return { type: 'ended', message: 'Session ended' };
+      return { type: 'ready', message: 'Join now!' };
     }
-  }, [sessionTime, completed, timeUntilStart]);
+  }, [sessionTime, completed]);
 
   // Handle join session with confirmation
   const handleJoinSession = useCallback(() => {
@@ -206,28 +233,28 @@ function SessionCard({ session, completed = false, compact = false, showActions 
     
     if (completed) classes.push('completed');
     if (compact) classes.push('compact');
-    if (!session?.partnerId) classes.push('waiting-partner');
-    if (session?.partnerId) classes.push('has-partner');
+    if (!partnerInfo.hasPartner) classes.push('waiting-partner');
+    if (partnerInfo.hasPartner) classes.push('has-partner');
     if (canJoin) classes.push('can-join');
     if (getTimeStatus?.type) classes.push(`time-${getTimeStatus.type}`);
     
     return classes.join(' ');
-  }, [completed, compact, session?.partnerId, canJoin, getTimeStatus]);
+  }, [completed, compact, partnerInfo.hasPartner, canJoin, getTimeStatus]);
 
-  // Render partner info
+  // Render partner info - FIXED to show correct partner
   const renderPartnerInfo = () => (
-    <div className={`session-partner ${partnerStatus.className}`}>
+    <div className={`session-partner ${partnerInfo.status.className}`}>
       <div className="partner-avatar">
-        {session?.partnerId && session?.partnerPhoto ? (
+        {partnerInfo.hasPartner && partnerInfo.photo ? (
           <img 
-            src={session.partnerPhoto} 
-            alt={session.partnerName || 'Study Partner'}
+            src={partnerInfo.photo} 
+            alt={partnerInfo.name}
             loading="lazy"
           />
         ) : (
           <div className="avatar-placeholder">
-            {session?.partnerId ? (
-              session?.partnerName?.charAt(0).toUpperCase() || 'P'
+            {partnerInfo.hasPartner ? (
+              partnerInfo.name?.charAt(0).toUpperCase() || 'P'
             ) : (
               <FiUsers size={16} />
             )}
@@ -235,28 +262,24 @@ function SessionCard({ session, completed = false, compact = false, showActions 
         )}
         
         {/* Online indicator for confirmed partners */}
-        {session?.partnerId && (
+        {partnerInfo.hasPartner && (
           <div className="online-indicator" />
         )}
       </div>
       
       <div className="partner-details">
         <div className="partner-name">
-          {session?.partnerId ? (
-            session.partnerName || 'Study Partner'
-          ) : (
-            partnerStatus.label
-          )}
+          {partnerInfo.name}
         </div>
         
         {!compact && (
           <div className="partner-subtitle">
-            {session?.partnerId ? (
+            {partnerInfo.hasPartner ? (
               `Ready to focus together`
             ) : (
               <span className="waiting-text">
                 <span className="pulse-dot" />
-                {partnerStatus.description}
+                {partnerInfo.status.description}
               </span>
             )}
           </div>
@@ -264,7 +287,7 @@ function SessionCard({ session, completed = false, compact = false, showActions 
       </div>
       
       <div className="partner-status-icon">
-        <partnerStatus.icon size={16} />
+        <partnerInfo.status.icon size={16} />
       </div>
     </div>
   );
@@ -278,9 +301,9 @@ function SessionCard({ session, completed = false, compact = false, showActions 
         <div className="session-status completed">
           <FiCheck size={16} />
           <span>Completed</span>
-          {session?.partnerId && !compact && (
+          {partnerInfo.hasPartner && !compact && (
             <div className="completion-note">
-              with {session.partnerName || 'partner'}
+              with {partnerInfo.name}
             </div>
           )}
         </div>
@@ -302,20 +325,16 @@ function SessionCard({ session, completed = false, compact = false, showActions 
       <div className="session-actions">
         {canJoin ? (
           <button 
-            className={`btn-session ${timeStatus?.type === 'ready' ? 'btn-primary' : 'btn-warning'}`}
+            className="btn-session btn-primary"
             onClick={handleJoinSession}
-            title={session?.partnerId ? 'Join focus session' : 'Enter session room'}
+            title={partnerInfo.hasPartner ? 'Join focus session' : 'Enter session room'}
           >
             <FiVideo size={16} />
-            <span>
-              {timeStatus?.type === 'late' ? 'Join Late' : 'Join Session'}
-            </span>
+            <span>Join Session</span>
           </button>
         ) : timeStatus ? (
           <div className={`session-countdown ${timeStatus.type}`}>
-            {timeStatus.type === 'upcoming' && <FiClock size={14} />}
-            {timeStatus.type === 'ended' && <FiX size={14} />}
-            {timeStatus.type === 'ready' && <FiPlay size={14} />}
+            <FiPlay size={14} />
             <span>{timeStatus.message}</span>
           </div>
         ) : (
@@ -326,7 +345,7 @@ function SessionCard({ session, completed = false, compact = false, showActions 
         )}
         
         {/* Waiting indicator for sessions without partners */}
-        {!session?.partnerId && !completed && (
+        {!partnerInfo.hasPartner && !completed && (
           <div className="waiting-indicator">
             <span className="pulse-dot" />
             <span className="waiting-text">Waiting for partner</span>
@@ -346,10 +365,7 @@ function SessionCard({ session, completed = false, compact = false, showActions 
         {/* Time status indicator */}
         {getTimeStatus && (
           <div className={`time-status-indicator ${getTimeStatus.type}`}>
-            {getTimeStatus.type === 'ready' && '🟢'}
-            {getTimeStatus.type === 'late' && '🟠'}
-            {getTimeStatus.type === 'upcoming' && '🔵'}
-            {getTimeStatus.type === 'ended' && '🔴'}
+            🟢
           </div>
         )}
 
@@ -428,10 +444,10 @@ function SessionCard({ session, completed = false, compact = false, showActions 
                   <FiTarget />
                   <span>{session.goal}</span>
                 </div>
-                {session?.partnerId && (
+                {partnerInfo.hasPartner && (
                   <div className="preview-item">
                     <FiUsers />
-                    <span>With {session.partnerName}</span>
+                    <span>With {partnerInfo.name}</span>
                   </div>
                 )}
               </div>
@@ -445,13 +461,6 @@ function SessionCard({ session, completed = false, compact = false, showActions 
                   <li>✅ Close distracting apps</li>
                 </ul>
               </div>
-
-              {getTimeStatus?.type === 'late' && (
-                <div className="late-warning">
-                  <FiAlertCircle />
-                  <span>This session has already started. You can still join!</span>
-                </div>
-              )}
             </div>
             
             <div className="modal-actions">

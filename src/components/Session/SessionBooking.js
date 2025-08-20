@@ -11,7 +11,8 @@ import {
   orderBy,
   runTransaction,
   doc,
-  addDoc
+  addDoc,
+  updateDoc
 } from 'firebase/firestore';
 import { db } from '../../config/firebase';
 import { useAuth } from '../../hooks/useAuth';
@@ -144,34 +145,34 @@ function SessionBooking() {
     return slots;
   }
 
-  // Fetch available sessions to join
+  // Fetch available sessions to join - FIXED QUERY
   const fetchAvailableSessions = useCallback(async () => {
     if (!user) return;
     
     setSessionsLoading(true);
     try {
       const now = new Date();
-      const dayStart = startOfDay(selectedDate);
-      const dayEnd = new Date(dayStart);
-      dayEnd.setHours(23, 59, 59, 999);
       
+      // Query for sessions that need partners (simplified query)
       const q = query(
         collection(db, 'sessions'),
         where('status', '==', 'scheduled'),
-        where('partnerId', '==', null),
-        where('userId', '!=', user.uid),
-        where('startTime', '>=', dayStart.toISOString()),
-        where('startTime', '<=', dayEnd.toISOString()),
         where('duration', '==', duration),
         orderBy('startTime', 'asc'),
-        limit(10)
+        limit(20)
       );
       
       const snapshot = await getDocs(q);
       const sessions = snapshot.docs
         .map(doc => ({ id: doc.id, ...doc.data() }))
-        .filter(session => new Date(session.startTime) > addHours(now, 0.25));
+        .filter(session => {
+          // Filter on client side for better compatibility
+          return session.userId !== user.uid && 
+                 !session.partnerId && 
+                 new Date(session.startTime) > now;
+        });
       
+      console.log('Available sessions found:', sessions.length);
       setAvailableSessions(sessions);
     } catch (error) {
       console.error('Error fetching sessions:', error);
@@ -179,45 +180,16 @@ function SessionBooking() {
     } finally {
       setSessionsLoading(false);
     }
-  }, [selectedDate, duration, user]);
+  }, [duration, user]);
 
   // Real-time updates for available sessions
   useEffect(() => {
     if (activeTab === 'join') {
       fetchAvailableSessions();
-      
-      // Set up real-time listener
-      const now = new Date();
-      const dayStart = startOfDay(selectedDate);
-      const dayEnd = new Date(dayStart);
-      dayEnd.setHours(23, 59, 59, 999);
-
-      const q = query(
-        collection(db, 'sessions'),
-        where('status', '==', 'scheduled'),
-        where('partnerId', '==', null),
-        where('userId', '!=', user.uid),
-        where('startTime', '>=', dayStart.toISOString()),
-        where('startTime', '<=', dayEnd.toISOString()),
-        where('duration', '==', duration),
-        orderBy('startTime', 'asc'),
-        limit(10)
-      );
-
-      const unsubscribe = onSnapshot(q, (snapshot) => {
-        const sessions = snapshot.docs
-          .map(doc => ({ id: doc.id, ...doc.data() }))
-          .filter(session => new Date(session.startTime) > addHours(now, 0.25));
-        
-        setAvailableSessions(sessions);
-        setSessionsLoading(false);
-      });
-
-      return () => unsubscribe();
     }
-  }, [activeTab, selectedDate, duration, user, fetchAvailableSessions]);
+  }, [activeTab, fetchAvailableSessions]);
 
-  // Quick match - find any available session or create one
+  // Quick match - FIXED LOGIC
   const handleQuickMatch = async () => {
     if (!goal.trim()) {
       toast.error('Please enter your goal first');
@@ -228,54 +200,49 @@ function SessionBooking() {
     setLoadingType('quick-match');
     
     try {
-      // Look for any available session in the next 4 hours
-      const now = new Date();
-      const endTime = addHours(now, 4);
+      console.log('Starting quick match...');
       
+      // Look for any available session with same duration
       const q = query(
         collection(db, 'sessions'),
         where('status', '==', 'scheduled'),
-        where('partnerId', '==', null),
-        where('userId', '!=', user.uid),
         where('duration', '==', duration),
-        where('startTime', '>=', addHours(now, 0.25).toISOString()),
-        where('startTime', '<=', endTime.toISOString()),
         orderBy('startTime', 'asc'),
-        limit(1)
+        limit(10)
       );
       
       const snapshot = await getDocs(q);
+      const availableSessions = snapshot.docs
+        .map(doc => ({ id: doc.id, ...doc.data() }))
+        .filter(session => 
+          session.userId !== user.uid && 
+          !session.partnerId
+        );
       
-      if (!snapshot.empty) {
-        // Join existing session
-        const sessionDoc = snapshot.docs[0];
-        const result = await joinSession(sessionDoc.id, sessionDoc.data().userName);
+      console.log('Found available sessions:', availableSessions.length);
+      
+      if (availableSessions.length > 0) {
+        // Join the first available session
+        const sessionToJoin = availableSessions[0];
+        const result = await joinSession(sessionToJoin.id, sessionToJoin.userName);
         
         if (result.success) {
           toast.success(`🎉 Quick match found! Joined ${result.partnerName}'s session!`);
-          // Navigate to dashboard instead of directly to session
           navigate('/dashboard');
           return;
         }
       }
       
-      // No match found, create new session for next available slot
-      const nextSlot = timeSlots.find(slot => {
-        const slotTime = new Date(slot.value);
-        return slotTime > addHours(now, 0.5) && slotTime <= endTime;
-      });
-      
-      if (!nextSlot) {
-        toast.error('No available time slots for quick match today');
-        return;
-      }
+      // No match found, create new session for immediate start
+      const now = new Date();
+      const startTime = new Date(now.getTime() + 2 * 60000); // 2 minutes from now
       
       const sessionData = {
         userId: user.uid,
         userName: user.displayName || user.email?.split('@')[0] || 'User',
         userPhoto: user.photoURL || null,
-        startTime: nextSlot.value,
-        endTime: addHours(new Date(nextSlot.value), duration / 60).toISOString(),
+        startTime: startTime.toISOString(),
+        endTime: addHours(startTime, duration / 60).toISOString(),
         duration: duration,
         goal: goal.trim(),
         category: selectedCategory
@@ -284,8 +251,7 @@ function SessionBooking() {
       const result = await createSession(sessionData);
       
       if (result.success) {
-        toast.success(`📚 Session created for ${nextSlot.time}! Check your dashboard to join when ready.`);
-        // Navigate to dashboard instead of directly to session
+        toast.success(`📚 Session created and ready to join! Starting in 2 minutes.`);
         navigate('/dashboard');
       }
       
@@ -298,42 +264,40 @@ function SessionBooking() {
     }
   };
 
-  // Create session
+  // Create session - SIMPLIFIED
   const createSession = async (sessionData) => {
     try {
-      const sessionRef = doc(collection(db, 'sessions'));
+      console.log('Creating session with data:', sessionData);
       
-      const result = await runTransaction(db, async (transaction) => {
-        const newSessionData = {
-          ...sessionData,
-          id: sessionRef.id,
-          createdAt: serverTimestamp(),
-          status: 'scheduled',
-          partnerId: null,
-          partnerName: null,
-          partnerPhoto: null,
-          participants: [user.uid],
-          maxParticipants: 2
-        };
-        
-        transaction.set(sessionRef, newSessionData);
-        
-        return {
-          success: true,
-          sessionId: sessionRef.id
-        };
-      });
+      const newSessionData = {
+        ...sessionData,
+        createdAt: serverTimestamp(),
+        status: 'scheduled',
+        partnerId: null,
+        partnerName: null,
+        partnerPhoto: null,
+        participants: [user.uid],
+        maxParticipants: 2
+      };
       
-      return result;
+      const docRef = await addDoc(collection(db, 'sessions'), newSessionData);
+      console.log('Session created with ID:', docRef.id);
+      
+      return {
+        success: true,
+        sessionId: docRef.id
+      };
     } catch (error) {
       console.error('Create session failed:', error);
       throw error;
     }
   };
 
-  // Join existing session
+  // Join existing session - FIXED LOGIC
   const joinSession = async (sessionId, partnerName) => {
     try {
+      console.log('Attempting to join session:', sessionId);
+      
       const sessionRef = doc(db, 'sessions', sessionId);
       
       const result = await runTransaction(db, async (transaction) => {
@@ -344,16 +308,30 @@ function SessionBooking() {
         }
         
         const sessionData = sessionDoc.data();
+        console.log('Session data:', sessionData);
         
         if (sessionData.partnerId) {
           throw new Error('Session already has a partner');
         }
         
+        if (sessionData.userId === user.uid) {
+          throw new Error('Cannot join your own session');
+        }
+        
+        // Get current participants array or create new one
+        const currentParticipants = sessionData.participants || [sessionData.userId];
+        
+        // Add user to participants if not already there
+        if (!currentParticipants.includes(user.uid)) {
+          currentParticipants.push(user.uid);
+        }
+        
+        // Update session with partner info
         transaction.update(sessionRef, {
           partnerId: user.uid,
           partnerName: user.displayName || user.email?.split('@')[0] || 'Study Partner',
           partnerPhoto: user.photoURL || null,
-          participants: [sessionData.userId, user.uid],
+          participants: currentParticipants,
           updatedAt: serverTimestamp()
         });
         
@@ -364,6 +342,7 @@ function SessionBooking() {
         };
       });
       
+      console.log('Successfully joined session');
       return result;
     } catch (error) {
       console.error('Join session failed:', error);
@@ -400,8 +379,7 @@ function SessionBooking() {
       const result = await createSession(sessionData);
       
       if (result.success) {
-        toast.success('📚 Session created! Check your dashboard to join when it\'s time.');
-        // Navigate to dashboard instead of directly to session
+        toast.success('📚 Session created! Check your dashboard.');
         navigate('/dashboard');
       }
     } catch (error) {
@@ -413,7 +391,7 @@ function SessionBooking() {
     }
   };
 
-  // Handle joining a specific session
+  // Handle joining a specific session - SIMPLIFIED
   const handleJoinSpecific = async (sessionId, creatorName) => {
     if (!goal.trim()) {
       toast.error('Please enter your goal first');
@@ -427,8 +405,7 @@ function SessionBooking() {
       const result = await joinSession(sessionId, creatorName);
       
       if (result.success) {
-        toast.success(`🤝 Joined ${creatorName}'s session! Check your dashboard.`);
-        // Navigate to dashboard instead of directly to session
+        toast.success(`🤝 Joined ${creatorName}'s session!`);
         navigate('/dashboard');
       }
     } catch (error) {
@@ -436,6 +413,8 @@ function SessionBooking() {
       if (error.message === 'Session already has a partner') {
         toast.error('This session is now full. Please try another one.');
         fetchAvailableSessions();
+      } else if (error.message === 'Cannot join your own session') {
+        toast.error('You cannot join your own session.');
       } else {
         toast.error('Failed to join session. Please try again.');
       }
@@ -591,7 +570,7 @@ function SessionBooking() {
               <div className="quick-match-info">
                 <p>
                   <FiCheck className="check-icon" />
-                  We'll match you with someone in the next 4 hours, or create a session for others to join
+                  We'll match you with someone immediately, or create a session for others to join
                 </p>
               </div>
             </div>
@@ -696,24 +675,6 @@ function SessionBooking() {
               <div className="join-filters">
                 <div className="filter-row">
                   <div className="filter-group">
-                    <label>Date</label>
-                    <div className="date-selector">
-                      {[0, 1, 2].map(days => {
-                        const date = addDays(new Date(), days);
-                        return (
-                          <button
-                            key={days}
-                            className={`date-btn ${selectedDate.toDateString() === date.toDateString() ? 'active' : ''}`}
-                            onClick={() => setSelectedDate(date)}
-                          >
-                            {formatDateLabel(date)}
-                          </button>
-                        );
-                      })}
-                    </div>
-                  </div>
-                  
-                  <div className="filter-group">
                     <label>Duration</label>
                     <select 
                       value={duration} 
@@ -727,6 +688,15 @@ function SessionBooking() {
                       ))}
                     </select>
                   </div>
+                  
+                  <button 
+                    onClick={fetchAvailableSessions}
+                    className="refresh-btn"
+                    disabled={sessionsLoading}
+                  >
+                    <FiRefreshCw className={sessionsLoading ? 'spinning' : ''} />
+                    Refresh
+                  </button>
                 </div>
 
                 {/* Goal for joining */}
@@ -747,13 +717,6 @@ function SessionBooking() {
               <div className="available-sessions">
                 <div className="sessions-header">
                   <h3>Available Sessions</h3>
-                  <button 
-                    onClick={fetchAvailableSessions}
-                    className="refresh-btn"
-                    disabled={sessionsLoading}
-                  >
-                    <FiRefreshCw className={sessionsLoading ? 'spinning' : ''} />
-                  </button>
                 </div>
                 
                 {sessionsLoading ? (
@@ -813,8 +776,8 @@ function SessionBooking() {
                   <div className="empty-state">
                     <div className="empty-icon">👥</div>
                     <h4>No Available Sessions</h4>
-                    <p>No sessions available for {formatDateLabel(selectedDate)} with {duration}-minute duration.</p>
-                    <p>Try a different date/duration, or create your own session!</p>
+                    <p>No sessions available with {duration}-minute duration.</p>
+                    <p>Try a different duration, or create your own session!</p>
                   </div>
                 )}
               </div>
