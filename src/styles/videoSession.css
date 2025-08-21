@@ -202,6 +202,47 @@
   outline: none;
 }
 
+/* Ensure Jitsi chat and panels don't conflict with our UI */
+.jitsi-container .chat-panel,
+.jitsi-container .participants-panel,
+.jitsi-container .settings-panel {
+  z-index: 500 !important; /* Lower than our header/footer */
+}
+
+/* Style Jitsi toolbar to match our theme */
+.jitsi-container .toolbox {
+  background: rgba(0, 0, 0, 0.8) !important;
+  backdrop-filter: blur(10px) !important;
+}
+
+.jitsi-container .toolbox-content {
+  background: transparent !important;
+}
+
+/* Ensure chat doesn't overlap with our bottom status */
+.jitsi-container .chat-panel {
+  bottom: 60px !important; /* Above our bottom status bar */
+}
+
+/* Mobile adjustments for Jitsi panels */
+@media (max-width: 768px) {
+  .jitsi-container .chat-panel,
+  .jitsi-container .participants-panel {
+    bottom: 50px !important;
+    max-height: calc(100vh - 120px) !important;
+  }
+  
+  .jitsi-container .toolbox {
+    padding-bottom: env(safe-area-inset-bottom) !important;
+  }
+}
+
+/* Ensure screen share doesn't conflict with our header */
+.jitsi-container .large-video-container {
+  top: 60px !important;
+  height: calc(100% - 60px) !important;
+}
+
 /* Video Loading Overlay - Minimal and clean */
 .video-overlay {
   position: absolute;

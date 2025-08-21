@@ -255,7 +255,7 @@ function VideoSession() {
           startWithAudioMuted: true,
           startWithVideoMuted: true,
           enableClosePage: false,
-          disableInviteFunctions: true,
+          disableInviteFunctions: false, // Enable invite functions for sharing
           enableWelcomePage: false,
           requireDisplayName: true,
           defaultLanguage: 'en',
@@ -263,9 +263,20 @@ function VideoSession() {
           enableTalkWhileMuted: false,
           disableRemoteMute: false,
           enableAutomaticUrlCopy: false,
-          toolbarButtons: isMobile ? 
-            ['microphone', 'camera', 'hangup', 'tileview'] :
-            ['microphone', 'camera', 'hangup', 'tileview', 'settings', 'fullscreen']
+          // Enable chat and other features
+          disableChat: false,
+          enableChat: true,
+          enableReactions: true,
+          enableScreensharing: true,
+          enableParticipantsPane: true,
+          enableVirtualBackground: true,
+          enableInsecureRoomNameWarning: false,
+          enableNoAudioDetection: true,
+          enableNoisyMicDetection: true,
+          enableOpusRed: true,
+          enableSaveLogs: false,
+          enableTalkWhileMuted: false,
+          enableUserRolesBasedOnToken: false
         },
         interfaceConfigOverwrite: {
           MOBILE_APP_PROMO: false,
@@ -275,13 +286,75 @@ function VideoSession() {
           ENABLE_MOBILE_BROWSER: true,
           HIDE_DEEP_LINKING_LOGO: true,
           TOOLBAR_ALWAYS_VISIBLE: true,
-          DISABLE_INVITE_FUNCTIONS: true,
+          DISABLE_INVITE_FUNCTIONS: false, // Enable invite functions
           DISABLE_DEEP_LINKING: true,
           DISABLE_JOIN_LEAVE_NOTIFICATIONS: false,
-          HIDE_INVITE_MORE_HEADER: true,
+          HIDE_INVITE_MORE_HEADER: false, // Show invite header
           SHOW_CHROME_EXTENSION_BANNER: false,
           VERTICAL_FILMSTRIP: false,
-          TILE_VIEW_MAX_COLUMNS: 2
+          TILE_VIEW_MAX_COLUMNS: 2,
+          // Enable all toolbar buttons including chat and screen share
+          TOOLBAR_BUTTONS: isMobile ? [
+            'microphone', 
+            'camera', 
+            'closedcaptions',
+            'desktop', // Screen share
+            'chat', // Chat
+            'participants-pane', // Participants
+            'tileview',
+            'hangup'
+          ] : [
+            'microphone', 
+            'camera', 
+            'closedcaptions',
+            'desktop', // Screen share
+            'fullscreen',
+            'fodeviceselection', // Device selection
+            'hangup',
+            'profile',
+            'chat', // Chat
+            'recording', // Recording (if enabled)
+            'livestreaming', // Live streaming (if enabled) 
+            'etherpad', // Collaborative document
+            'sharedvideo', // Shared video
+            'participants-pane', // Participants panel
+            'settings', // Settings
+            'raisehand', // Raise hand
+            'videoquality', // Video quality
+            'filmstrip', // Toggle filmstrip
+            'feedback', // Feedback
+            'stats', // Statistics
+            'shortcuts', // Keyboard shortcuts
+            'tileview', // Tile view
+            'videobackgroundblur', // Background blur
+            'download', // Download logs
+            'help', // Help
+            'mute-everyone', // Mute everyone (if moderator)
+            'security' // Security options
+          ],
+          // Chat settings
+          CHAT_ENABLED: true,
+          DISPLAY_WELCOME_PAGE_CONTENT: false,
+          DISPLAY_WELCOME_PAGE_TOOLBAR_ADDITIONAL_CONTENT: false,
+          // Participant settings
+          HIDE_PARTICIPANTS_STATS: false,
+          // Other useful settings
+          DEFAULT_BACKGROUND: '#1e1b4b',
+          OPTIMAL_BROWSERS: ['chrome', 'chromium', 'firefox', 'safari', 'webkit'],
+          UNSUPPORTED_BROWSERS: [],
+          // Mobile specific
+          ...(isMobile && {
+            TOOLBAR_BUTTONS: [
+              'microphone', 
+              'camera', 
+              'desktop', // Screen share on mobile
+              'chat', // Chat on mobile
+              'participants-pane', // Participants on mobile
+              'raisehand', // Raise hand
+              'tileview',
+              'hangup'
+            ]
+          })
         }
       };
 
@@ -295,7 +368,7 @@ function VideoSession() {
       setTimeout(() => {
         if (mountedRef.current) {
           setVideoReady(true);
-          toast.success('📹 Video ready!');
+          toast.success('📹 Video ready! Use chat, screen share & more tools available.');
         }
       }, 2000);
       
@@ -575,7 +648,7 @@ function VideoSession() {
               <div className="video-overlay">
                 <div className="session-active-icon">🎯</div>
                 <h3>Focus Session Active</h3>
-                <p>Your session has started! Video is loading...</p>
+                <p>Your session has started! Video is loading with chat, screen share & collaboration tools...</p>
                 
                 <div className="session-details">
                   <div className="detail">
@@ -602,7 +675,7 @@ function VideoSession() {
                       width: videoReady ? '100%' : '70%'
                     }}></div>
                   </div>
-                  <p>Connecting to video chat...</p>
+                  <p>Loading video chat, screen share, and collaboration tools...</p>
                 </div>
               </div>
             )}
