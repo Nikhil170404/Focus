@@ -1,9 +1,8 @@
-import React, { useState, useEffect, useRef, useCallback , useMemo } from 'react';
+import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { doc, updateDoc, onSnapshot, serverTimestamp, getDoc } from 'firebase/firestore';
 import { db } from '../../config/firebase';
 import { useAuth } from '../../hooks/useAuth';
-import SessionTimer from './SessionTimer';
 import { 
   FiX,
   FiClock,
@@ -13,10 +12,6 @@ import {
   FiWifi,
   FiCheck,
   FiRefreshCw,
-  FiMic,
-  FiMicOff,
-  FiVideo,
-  FiVideoOff,
   FiAlertCircle
 } from 'react-icons/fi';
 import toast from 'react-hot-toast';
@@ -24,7 +19,7 @@ import toast from 'react-hot-toast';
 // SIMPLIFIED: Only 3 states needed
 const CONNECTION_STATES = {
   LOADING: 'loading',
-  ACTIVE: 'active',  // Session is active with timer
+  ACTIVE: 'active',
   ENDED: 'ended'
 };
 
@@ -38,19 +33,23 @@ function VideoSession() {
   const apiRef = useRef(null);
   const mountedRef = useRef(true);
   const sessionListenerRef = useRef(null);
+  const timerIntervalRef = useRef(null);
   
-  // Simplified state - no complex connection states
+  // Simplified state
   const [session, setSession] = useState(null);
   const [connectionState, setConnectionState] = useState(CONNECTION_STATES.LOADING);
-  const [participantCount, setParticipantCount] = useState(1);
+  const [participantCount, setParticipantCount] = useState(0);
   const [error, setError] = useState(null);
   const [isMobile] = useState(window.innerWidth <= 768);
+  const [isTablet] = useState(window.innerWidth > 768 && window.innerWidth <= 1024);
   const [userRole, setUserRole] = useState(null);
   const [videoReady, setVideoReady] = useState(false);
+  const [participantNames, setParticipantNames] = useState([]);
   
-  // Audio/Video controls
-  const [isAudioMuted, setIsAudioMuted] = useState(true);
-  const [isVideoMuted, setIsVideoMuted] = useState(true);
+  // Timer state
+  const [timeLeft, setTimeLeft] = useState(0);
+  const [totalTime, setTotalTime] = useState(0);
+  const [timerRunning, setTimerRunning] = useState(false);
 
   // Cleanup on unmount
   useEffect(() => {
@@ -97,6 +96,28 @@ function VideoSession() {
       setSession(sessionData);
       setUserRole(isCreator ? 'creator' : 'partner');
       
+      // Set initial participant count based on session data
+      let initialCount = 1; // Current user
+      const names = [user?.displayName || user?.email?.split('@')[0] || 'You'];
+      
+      if (sessionData.partnerId) {
+        initialCount = 2;
+        if (isCreator && sessionData.partnerName) {
+          names.push(sessionData.partnerName);
+        } else if (!isCreator && sessionData.userName) {
+          names.push(sessionData.userName);
+        }
+      }
+      
+      setParticipantCount(initialCount);
+      setParticipantNames(names);
+      
+      // Initialize timer
+      const duration = sessionData.duration || 50;
+      const totalSeconds = duration * 60;
+      setTimeLeft(totalSeconds);
+      setTotalTime(totalSeconds);
+      
       // Set up real-time listener
       setupSessionListener();
       
@@ -104,7 +125,10 @@ function VideoSession() {
       console.log('✅ Session loaded, starting immediately...');
       setConnectionState(CONNECTION_STATES.ACTIVE);
       
-      toast.success('🎯 Focus session started! Begin working on your goal.');
+      // Start timer automatically
+      setTimerRunning(true);
+      
+      toast.success('🎯 Focus session started!');
       
       // Load video in background (non-blocking)
       setTimeout(() => {
@@ -116,6 +140,47 @@ function VideoSession() {
       setError(error.message);
     }
   };
+
+  // Timer effect
+  useEffect(() => {
+    if (timerRunning && timeLeft > 0) {
+      timerIntervalRef.current = setInterval(() => {
+        setTimeLeft(prev => {
+          const newTime = prev - 1;
+          if (newTime <= 0) {
+            setTimerRunning(false);
+            onTimerComplete();
+            return 0;
+          }
+          return newTime;
+        });
+      }, 1000);
+    } else {
+      if (timerIntervalRef.current) {
+        clearInterval(timerIntervalRef.current);
+        timerIntervalRef.current = null;
+      }
+    }
+
+    return () => {
+      if (timerIntervalRef.current) {
+        clearInterval(timerIntervalRef.current);
+      }
+    };
+  }, [timerRunning, timeLeft]);
+
+  // Format time display
+  const formatTime = useCallback((seconds) => {
+    const mins = Math.floor(seconds / 60);
+    const secs = seconds % 60;
+    return `${mins}:${secs.toString().padStart(2, '0')}`;
+  }, []);
+
+  // Calculate progress percentage
+  const progress = useMemo(() => {
+    if (totalTime === 0) return 0;
+    return ((totalTime - timeLeft) / totalTime) * 100;
+  }, [timeLeft, totalTime]);
 
   // Set up session listener (simple)
   const setupSessionListener = () => {
@@ -129,6 +194,23 @@ function VideoSession() {
         if (docSnap.exists()) {
           const sessionData = { id: docSnap.id, ...docSnap.data() };
           setSession(sessionData);
+          
+          // Update participant information
+          const names = [user?.displayName || user?.email?.split('@')[0] || 'You'];
+          let count = 1;
+          
+          if (sessionData.partnerId) {
+            count = 2;
+            const isCreator = sessionData.userId === user.uid;
+            if (isCreator && sessionData.partnerName) {
+              names.push(sessionData.partnerName);
+            } else if (!isCreator && sessionData.userName) {
+              names.push(sessionData.userName);
+            }
+          }
+          
+          setParticipantCount(count);
+          setParticipantNames(names);
           
           if (sessionData.status === 'completed' || sessionData.status === 'cancelled') {
             handleSessionEnd();
@@ -175,7 +257,15 @@ function VideoSession() {
           enableClosePage: false,
           disableInviteFunctions: true,
           enableWelcomePage: false,
-          requireDisplayName: true
+          requireDisplayName: true,
+          defaultLanguage: 'en',
+          enableNoisyMicDetection: true,
+          enableTalkWhileMuted: false,
+          disableRemoteMute: false,
+          enableAutomaticUrlCopy: false,
+          toolbarButtons: isMobile ? 
+            ['microphone', 'camera', 'hangup', 'tileview'] :
+            ['microphone', 'camera', 'hangup', 'tileview', 'settings', 'fullscreen']
         },
         interfaceConfigOverwrite: {
           MOBILE_APP_PROMO: false,
@@ -184,34 +274,34 @@ function VideoSession() {
           SHOW_POWERED_BY: false,
           ENABLE_MOBILE_BROWSER: true,
           HIDE_DEEP_LINKING_LOGO: true,
-          TOOLBAR_BUTTONS: isMobile ? 
-            ['microphone', 'camera', 'hangup'] :
-            ['microphone', 'camera', 'hangup', 'settings'],
-          TOOLBAR_ALWAYS_VISIBLE: isMobile,
+          TOOLBAR_ALWAYS_VISIBLE: true,
           DISABLE_INVITE_FUNCTIONS: true,
           DISABLE_DEEP_LINKING: true,
-          DISABLE_JOIN_LEAVE_NOTIFICATIONS: true
+          DISABLE_JOIN_LEAVE_NOTIFICATIONS: false,
+          HIDE_INVITE_MORE_HEADER: true,
+          SHOW_CHROME_EXTENSION_BANNER: false,
+          VERTICAL_FILMSTRIP: false,
+          TILE_VIEW_MAX_COLUMNS: 2
         }
       };
 
       console.log('🔧 Creating Jitsi API...');
       apiRef.current = new window.JitsiMeetExternalAPI('meet.jit.si', options);
       
-      // Simple event listeners (don't affect session state)
+      // Simple event listeners
       setupSimpleVideoEvents();
       
-      // Mark video as ready after 3 seconds
+      // Mark video as ready after 2 seconds
       setTimeout(() => {
         if (mountedRef.current) {
           setVideoReady(true);
-          toast.success('📹 Video chat is now available!');
+          toast.success('📹 Video ready!');
         }
-      }, 3000);
+      }, 2000);
       
     } catch (error) {
-      console.error('❌ Video background loading failed:', error);
-      // Session continues without video - not a problem!
-      toast('Video unavailable - focus session continues', {
+      console.error('❌ Video loading failed:', error);
+      toast('Video unavailable - session continues', {
         icon: '📚',
         duration: 3000
       });
@@ -243,66 +333,31 @@ function VideoSession() {
     });
   };
 
-  // Simple video events (don't block anything)
+  // Simple video events
   const setupSimpleVideoEvents = () => {
     if (!apiRef.current) return;
-
-    console.log('🎧 Setting up simple video events...');
 
     try {
       // Participant events
       apiRef.current.addEventListener('participantJoined', (participant) => {
-        console.log('👤 Participant joined:', participant);
-        setParticipantCount(prev => prev + 1);
-        const name = participant.displayName || participant.formattedDisplayName || 'Study partner';
-        toast.success(`${name} joined the video! 🤝`);
+        const name = participant.displayName || 'Study partner';
+        toast.success(`${name} joined! 🤝`);
       });
 
       apiRef.current.addEventListener('participantLeft', (participant) => {
-        console.log('👋 Participant left:', participant);
-        setParticipantCount(prev => Math.max(1, prev - 1));
-        const name = participant.displayName || participant.formattedDisplayName || 'Study partner';
-        toast(`${name} left the video chat`);
-      });
-
-      // Audio/Video status
-      apiRef.current.addEventListener('audioMuteStatusChanged', (event) => {
-        setIsAudioMuted(event.muted);
-      });
-
-      apiRef.current.addEventListener('videoMuteStatusChanged', (event) => {
-        setIsVideoMuted(event.muted);
+        const name = participant.displayName || 'Study partner';
+        toast(`${name} left the session`);
       });
 
       // Ready to close
       apiRef.current.addEventListener('readyToClose', () => {
         endSession();
       });
+
     } catch (error) {
       console.log('Video event setup error (non-critical):', error);
     }
   };
-
-  // Audio/Video controls
-  const toggleAudio = useCallback(() => {
-    if (apiRef.current) {
-      try {
-        apiRef.current.executeCommand('toggleAudio');
-      } catch (error) {
-        console.log('Audio toggle error:', error);
-      }
-    }
-  }, []);
-
-  const toggleVideo = useCallback(() => {
-    if (apiRef.current) {
-      try {
-        apiRef.current.executeCommand('toggleVideo');
-      } catch (error) {
-        console.log('Video toggle error:', error);
-      }
-    }
-  }, []);
 
   // Session management
   const endSession = useCallback(async () => {
@@ -318,7 +373,7 @@ function VideoSession() {
       }
 
       cleanup();
-      toast.success('Session completed! Great work! 🎉');
+      toast.success('Session completed! 🎉');
       navigate('/dashboard');
     } catch (error) {
       console.error('Error ending session:', error);
@@ -349,6 +404,11 @@ function VideoSession() {
       sessionListenerRef.current = null;
     }
 
+    if (timerIntervalRef.current) {
+      clearInterval(timerIntervalRef.current);
+      timerIntervalRef.current = null;
+    }
+
     if (apiRef.current) {
       try {
         apiRef.current.dispose();
@@ -361,7 +421,7 @@ function VideoSession() {
 
   // Timer completion
   const onTimerComplete = useCallback(() => {
-    toast.success('Time\'s up! Session completed! 🎯');
+    toast.success('Time\'s up! 🎯');
     setTimeout(endSession, 2000);
   }, [endSession]);
 
@@ -380,7 +440,7 @@ function VideoSession() {
     if (!session.partnerId) {
       return {
         hasPartner: false,
-        name: 'Looking for partner...',
+        name: 'Waiting for partner',
         description: 'Others can join this session'
       };
     }
@@ -399,12 +459,12 @@ function VideoSession() {
       <div className="video-session-loading">
         <div className="loading-container">
           <FiLoader className="spinner" />
-          <h3>Starting your focus session</h3>
-          <p>Just a moment...</p>
+          <h3>Starting Focus Session</h3>
+          <p>Setting up your workspace...</p>
           
           {session && (
             <div className="session-preview">
-              <h4>Focus Goal:</h4>
+              <h4>Goal:</h4>
               <p className="session-goal">"{session.goal}"</p>
               <p>Duration: {session.duration} minutes</p>
             </div>
@@ -444,11 +504,11 @@ function VideoSession() {
         <div className="ended-container">
           <div className="ended-icon">🎉</div>
           <h2>Session Completed!</h2>
-          <p>Great work on your focus session!</p>
+          <p>Excellent work on your focus session!</p>
           <div className="ended-stats">
             <div className="stat">
               <span>Duration</span>
-              <span>{session?.duration || 50} minutes</span>
+              <span>{session?.duration || 50} min</span>
             </div>
             <div className="stat">
               <span>Goal</span>
@@ -461,98 +521,119 @@ function VideoSession() {
     );
   }
 
-  // MAIN SESSION VIEW - Always active, video loads in background
+  // MAIN SESSION VIEW - World-class clean interface
   return (
-    <div className={`video-session ${isMobile ? 'mobile' : 'desktop'}`}>
-      {/* Header */}
+    <div className={`video-session ${isMobile ? 'mobile' : isTablet ? 'tablet' : 'desktop'}`}>
+      {/* Clean Header with inline timer */}
       <div className="video-header">
         <div className="session-info">
           <h3 className="session-title">{session?.goal || 'Focus Session'}</h3>
           <div className="session-meta">
             <span className="duration">
-              <FiClock /> {session?.duration || 50}min
+              <FiClock /> {session?.duration}min
             </span>
-            <span className="participants">
+            <span className="participant-count">
               <FiUsers /> {participantCount}/2
             </span>
-            <span className="video-status">
-              <FiWifi style={{ color: videoReady ? '#10b981' : '#f59e0b' }} /> 
-              {videoReady ? 'Video Ready' : 'Video Loading...'}
-            </span>
+            {videoReady && (
+              <span className="video-status">
+                <FiWifi /> Ready
+              </span>
+            )}
           </div>
         </div>
         
-        <button 
-          onClick={userRole === 'creator' ? endSession : leaveSession} 
-          className="btn-leave"
-          title={userRole === 'creator' ? 'End session' : 'Leave session'}
-        >
-          {userRole === 'creator' ? <FiX /> : <FiArrowLeft />}
-        </button>
+        <div className="header-actions">
+          {/* Inline Timer */}
+          <div 
+            className="header-timer"
+            style={{ '--progress': `${progress}%` }}
+          >
+            <div className="timer-display">
+              <div className={`timer-status ${!timerRunning ? 'paused' : ''}`}></div>
+              <span className="timer-text">{formatTime(timeLeft)}</span>
+            </div>
+          </div>
+
+          {/* Leave/End Button */}
+          <button 
+            onClick={userRole === 'creator' ? endSession : leaveSession} 
+            className="btn-leave"
+            title={userRole === 'creator' ? 'End session' : 'Leave session'}
+          >
+            {userRole === 'creator' ? <FiX /> : <FiArrowLeft />}
+          </button>
+        </div>
       </div>
 
-      {/* Video Container */}
-      <div className="video-main">
-        <div ref={jitsiContainerRef} className="jitsi-container">
-          {/* Session is active - show encouragement */}
-          {!videoReady && (
-            <div className="video-overlay">
-              <div className="session-active-icon">🎯</div>
-              <h3>Focus Session Active!</h3>
-              <p>Start working on your goal. Video is loading in the background.</p>
-              
-              <div className="session-details">
-                <div className="detail">
-                  <strong>Goal:</strong> {session?.goal}
+      {/* Full Screen Video */}
+      <div className="video-content">
+        <div className="video-container">
+          <div ref={jitsiContainerRef} className="jitsi-container">
+            {/* Loading overlay only when video not ready */}
+            {!videoReady && (
+              <div className="video-overlay">
+                <div className="session-active-icon">🎯</div>
+                <h3>Focus Session Active</h3>
+                <p>Your session has started! Video is loading...</p>
+                
+                <div className="session-details">
+                  <div className="detail">
+                    <strong>Goal:</strong>
+                    <span>{session?.goal}</span>
+                  </div>
+                  <div className="detail">
+                    <strong>Time Left:</strong>
+                    <span>{formatTime(timeLeft)}</span>
+                  </div>
+                  <div className="detail">
+                    <strong>Participants:</strong>
+                    <span>{participantCount}/2</span>
+                  </div>
+                  <div className="detail">
+                    <strong>Status:</strong>
+                    <span>{partnerInfo.description}</span>
+                  </div>
                 </div>
-                <div className="detail">
-                  <strong>Partner:</strong> {partnerInfo.name}
-                </div>
-                <div className="detail">
-                  <strong>Description:</strong> {partnerInfo.description}
+
+                <div className="loading-progress">
+                  <div className="progress-bar">
+                    <div className="progress-fill" style={{ 
+                      width: videoReady ? '100%' : '70%'
+                    }}></div>
+                  </div>
+                  <p>Connecting to video chat...</p>
                 </div>
               </div>
-            </div>
-          )}
-        </div>
-
-        {/* Session Timer - ALWAYS SHOWN */}
-        <div className="session-timer-overlay">
-          <SessionTimer 
-            duration={session?.duration || 50}
-            onComplete={onTimerComplete}
-            autoStart={true}
-            isOverlay={true}
-            isMobile={isMobile}
-          />
-        </div>
-
-        {/* Video Controls - only show when video is ready */}
-        {isMobile && videoReady && apiRef.current && (
-          <div className="mobile-controls">
-            <button 
-              onClick={toggleAudio}
-              className={`control-btn ${isAudioMuted ? 'muted' : ''}`}
-              title={isAudioMuted ? 'Unmute microphone' : 'Mute microphone'}
-            >
-              {isAudioMuted ? <FiMicOff /> : <FiMic />}
-            </button>
-            <button 
-              onClick={toggleVideo}
-              className={`control-btn ${isVideoMuted ? 'muted' : ''}`}
-              title={isVideoMuted ? 'Turn on camera' : 'Turn off camera'}
-            >
-              {isVideoMuted ? <FiVideoOff /> : <FiVideo />}
-            </button>
+            )}
           </div>
-        )}
+        </div>
       </div>
 
-      {/* Session Info Footer */}
-      <div className="session-footer">
-        <div className="session-encouragement">
-          <p>💡 <strong>Focus Tip:</strong> Put your phone away and eliminate distractions for maximum productivity!</p>
+      {/* Bottom Status Bar */}
+      <div className="bottom-status">
+        <div className="status-indicator">
+          <div className="status-icon">💡</div>
+          <div className="status-text">
+            <strong>Focus Tip:</strong> Eliminate distractions for maximum productivity
+          </div>
         </div>
+        
+        {partnerInfo.hasPartner && (
+          <div className="partner-status">
+            <div className="partner-avatar">
+              {partnerInfo.name.charAt(0).toUpperCase()}
+            </div>
+            <span>With {partnerInfo.name}</span>
+          </div>
+        )}
+        
+        {!partnerInfo.hasPartner && (
+          <div className="partner-status">
+            <div className="partner-avatar">⏳</div>
+            <span>Waiting for partner</span>
+          </div>
+        )}
       </div>
     </div>
   );
