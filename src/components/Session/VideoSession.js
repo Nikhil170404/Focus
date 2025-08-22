@@ -4,19 +4,20 @@ import { doc, updateDoc, onSnapshot, serverTimestamp, getDoc } from 'firebase/fi
 import { db } from '../../config/firebase';
 import { useAuth } from '../../hooks/useAuth';
 import { 
-  FiX,
   FiClock,
   FiUsers,
   FiArrowLeft,
   FiLoader,
   FiWifi,
-  FiCheck,
   FiRefreshCw,
-  FiAlertCircle
+  FiAlertCircle,
+  FiPlay,
+  FiPause,
+  FiStopCircle
 } from 'react-icons/fi';
 import toast from 'react-hot-toast';
 
-// SIMPLIFIED: Only 3 states needed
+// Session states
 const CONNECTION_STATES = {
   LOADING: 'loading',
   ACTIVE: 'active',
@@ -28,14 +29,15 @@ function VideoSession() {
   const { user } = useAuth();
   const navigate = useNavigate();
   
-  // Simplified refs
+  // Refs
   const jitsiContainerRef = useRef(null);
   const apiRef = useRef(null);
   const mountedRef = useRef(true);
   const sessionListenerRef = useRef(null);
   const timerIntervalRef = useRef(null);
+  const autoEndTimeoutRef = useRef(null);
   
-  // Simplified state
+  // Core state
   const [session, setSession] = useState(null);
   const [connectionState, setConnectionState] = useState(CONNECTION_STATES.LOADING);
   const [participantCount, setParticipantCount] = useState(0);
@@ -46,112 +48,234 @@ function VideoSession() {
   const [videoReady, setVideoReady] = useState(false);
   const [participantNames, setParticipantNames] = useState([]);
   
-  // Timer state
+  // IMPROVED: Enhanced timer state
   const [timeLeft, setTimeLeft] = useState(0);
   const [totalTime, setTotalTime] = useState(0);
   const [timerRunning, setTimerRunning] = useState(false);
+  const [showEndConfirmation, setShowEndConfirmation] = useState(false);
+  const [autoEndWarning, setAutoEndWarning] = useState(false);
+  const [timerPhase, setTimerPhase] = useState('ready'); // 'ready', 'running', 'warning', 'ending'
 
   // Cleanup on unmount
   useEffect(() => {
     mountedRef.current = true;
+    
+    const cleanup = () => {
+      console.log('🧹 Cleaning up...');
+
+      if (sessionListenerRef.current) {
+        sessionListenerRef.current();
+        sessionListenerRef.current = null;
+      }
+
+      if (timerIntervalRef.current) {
+        clearInterval(timerIntervalRef.current);
+        timerIntervalRef.current = null;
+      }
+
+      if (autoEndTimeoutRef.current) {
+        clearTimeout(autoEndTimeoutRef.current);
+        autoEndTimeoutRef.current = null;
+      }
+
+      if (apiRef.current) {
+        try {
+          apiRef.current.dispose();
+        } catch (e) {
+          console.log('Cleanup error:', e);
+        }
+        apiRef.current = null;
+      }
+    };
+    
     return () => {
       mountedRef.current = false;
       cleanup();
     };
   }, []);
 
-  // SIMPLIFIED: Load session and start immediately
+  // Initialize session
   useEffect(() => {
+    const initSession = async () => {
+      try {
+        console.log('🚀 Initializing session...');
+        
+        const sessionDoc = await getDoc(doc(db, 'sessions', sessionId));
+        
+        if (!sessionDoc.exists()) {
+          throw new Error('Session not found');
+        }
+
+        const sessionData = { id: sessionDoc.id, ...sessionDoc.data() };
+        
+        // Validate access
+        const isCreator = sessionData.userId === user.uid;
+        const isPartner = sessionData.partnerId === user.uid;
+        const isInParticipants = sessionData.participants && sessionData.participants.includes(user.uid);
+        
+        if (!isCreator && !isPartner && !isInParticipants) {
+          throw new Error('You do not have access to this session');
+        }
+
+        setSession(sessionData);
+        setUserRole(isCreator ? 'creator' : 'partner');
+        
+        // Initialize participant info
+        let initialCount = 1;
+        const names = [user?.displayName || user?.email?.split('@')[0] || 'You'];
+        
+        if (sessionData.partnerId) {
+          initialCount = 2;
+          if (isCreator && sessionData.partnerName) {
+            names.push(sessionData.partnerName);
+          } else if (!isCreator && sessionData.userName) {
+            names.push(sessionData.userName);
+          }
+        }
+        
+        setParticipantCount(initialCount);
+        setParticipantNames(names);
+        
+        // IMPROVED: Initialize timer with session timing
+        const duration = sessionData.duration || 50;
+        const totalSeconds = duration * 60;
+        
+        // Check if session should have already started
+        const sessionStartTime = new Date(sessionData.startTime);
+        const now = new Date();
+        const timeSinceStart = (now - sessionStartTime) / 1000; // seconds
+        
+        if (timeSinceStart > 0) {
+          // Session has already started, adjust timer
+          const adjustedTimeLeft = Math.max(0, totalSeconds - timeSinceStart);
+          setTimeLeft(Math.floor(adjustedTimeLeft));
+          
+          if (adjustedTimeLeft > 0) {
+            setTimerRunning(true);
+            setTimerPhase('running');
+            toast.success('🎯 Joined session in progress!');
+          } else {
+            // Session should have ended
+            toast.error('This session has already ended.');
+            setTimeout(() => navigate('/dashboard'), 2000);
+            return;
+          }
+        } else {
+          // Session hasn't started yet, wait or start immediately
+          setTimeLeft(totalSeconds);
+          setTimerRunning(true);
+          setTimerPhase('running');
+          toast.success('🎯 Focus session started!');
+        }
+        
+        setTotalTime(totalSeconds);
+        
+        // Set up real-time listener
+        setupSessionListener();
+        
+        setConnectionState(CONNECTION_STATES.ACTIVE);
+        
+        // Load video in background
+        setTimeout(() => {
+          loadVideoInBackground();
+        }, 1000);
+        
+      } catch (error) {
+        console.error('❌ Session initialization failed:', error);
+        setError(error.message);
+      }
+    };
+
     if (!sessionId || !user?.uid) {
       setError('Invalid session or user not authenticated');
       return;
     }
 
-    initializeSessionFast();
-  }, [sessionId, user?.uid]);
+    initSession();
+  }, [sessionId, user?.uid, navigate]);
 
-  // SUPER SIMPLE: Load session and start session immediately
-  const initializeSessionFast = async () => {
-    try {
-      console.log('🚀 Fast session initialization...');
-      
-      // Load session data
-      const sessionDoc = await getDoc(doc(db, 'sessions', sessionId));
-      
-      if (!sessionDoc.exists()) {
-        throw new Error('Session not found');
-      }
-
-      const sessionData = { id: sessionDoc.id, ...sessionDoc.data() };
-      
-      // Quick access validation
-      const isCreator = sessionData.userId === user.uid;
-      const isPartner = sessionData.partnerId === user.uid;
-      const isInParticipants = sessionData.participants && sessionData.participants.includes(user.uid);
-      
-      if (!isCreator && !isPartner && !isInParticipants) {
-        throw new Error('You do not have access to this session');
-      }
-
-      setSession(sessionData);
-      setUserRole(isCreator ? 'creator' : 'partner');
-      
-      // Set initial participant count based on session data
-      let initialCount = 1; // Current user
-      const names = [user?.displayName || user?.email?.split('@')[0] || 'You'];
-      
-      if (sessionData.partnerId) {
-        initialCount = 2;
-        if (isCreator && sessionData.partnerName) {
-          names.push(sessionData.partnerName);
-        } else if (!isCreator && sessionData.userName) {
-          names.push(sessionData.userName);
-        }
-      }
-      
-      setParticipantCount(initialCount);
-      setParticipantNames(names);
-      
-      // Initialize timer
-      const duration = sessionData.duration || 50;
-      const totalSeconds = duration * 60;
-      setTimeLeft(totalSeconds);
-      setTotalTime(totalSeconds);
-      
-      // Set up real-time listener
-      setupSessionListener();
-      
-      // IMMEDIATELY start the session - no waiting!
-      console.log('✅ Session loaded, starting immediately...');
-      setConnectionState(CONNECTION_STATES.ACTIVE);
-      
-      // Start timer automatically
-      setTimerRunning(true);
-      
-      toast.success('🎯 Focus session started!');
-      
-      // Load video in background (non-blocking)
-      setTimeout(() => {
-        loadVideoInBackground();
-      }, 1000);
-      
-    } catch (error) {
-      console.error('❌ Session initialization failed:', error);
-      setError(error.message);
-    }
-  };
-
-  // Timer effect
+  // IMPROVED: Timer effect with enhanced controls
   useEffect(() => {
+    const handleTimerComplete = async () => {
+      if (!mountedRef.current) return;
+
+      console.log('⏰ Timer completed - auto-ending session');
+      
+      try {
+        // Show completion celebration
+        toast.success('🎉 Focus session completed! Excellent work!', { duration: 5000 });
+        
+        // Update session status
+        if (sessionId && session?.status !== 'completed') {
+          await updateDoc(doc(db, 'sessions', sessionId), {
+            status: 'completed',
+            endedAt: serverTimestamp(),
+            actualDuration: session?.duration || 50,
+            completedBy: 'timer'
+          });
+        }
+
+        // Auto-redirect after 3 seconds
+        autoEndTimeoutRef.current = setTimeout(() => {
+          if (mountedRef.current) {
+            navigate('/dashboard');
+          }
+        }, 3000);
+        
+      } catch (error) {
+        console.error('Error completing session:', error);
+        // Still redirect even if update fails
+        setTimeout(() => {
+          navigate('/dashboard');
+        }, 2000);
+      }
+    };
+
     if (timerRunning && timeLeft > 0) {
       timerIntervalRef.current = setInterval(() => {
         setTimeLeft(prev => {
           const newTime = prev - 1;
+          
+          // Update timer phase based on remaining time
+          if (newTime <= 300 && newTime > 60) { // Last 5 minutes
+            setTimerPhase('warning');
+            
+            // Show warning at 5 minutes
+            if (newTime === 300) {
+              setAutoEndWarning(true);
+              toast('⏰ 5 minutes remaining! Session will end automatically.', {
+                duration: 5000,
+                icon: '⚠️'
+              });
+            }
+          } else if (newTime <= 60) { // Last minute
+            setTimerPhase('ending');
+            
+            // Show final warning at 1 minute
+            if (newTime === 60) {
+              toast('🚨 Final minute! Session ending soon.', {
+                duration: 3000,
+                icon: '🔔'
+              });
+            }
+            
+            // Countdown notifications in last 10 seconds
+            if (newTime <= 10 && newTime > 0) {
+              toast(`${newTime}`, {
+                duration: 1000,
+                icon: '⏰'
+              });
+            }
+          }
+          
+          // Auto-end session when timer reaches 0
           if (newTime <= 0) {
             setTimerRunning(false);
-            onTimerComplete();
+            setTimerPhase('ended');
+            handleTimerComplete();
             return 0;
           }
+          
           return newTime;
         });
       }, 1000);
@@ -167,7 +291,7 @@ function VideoSession() {
         clearInterval(timerIntervalRef.current);
       }
     };
-  }, [timerRunning, timeLeft]);
+  }, [timerRunning, timeLeft, sessionId, session?.status, session?.duration, navigate]);
 
   // Format time display
   const formatTime = useCallback((seconds) => {
@@ -182,8 +306,18 @@ function VideoSession() {
     return ((totalTime - timeLeft) / totalTime) * 100;
   }, [timeLeft, totalTime]);
 
-  // Set up session listener (simple)
-  const setupSessionListener = () => {
+  // Get timer color based on phase
+  const getTimerColor = useCallback(() => {
+    switch (timerPhase) {
+      case 'warning': return '#f59e0b';
+      case 'ending': return '#ef4444';
+      case 'ended': return '#6b7280';
+      default: return '#10b981';
+    }
+  }, [timerPhase]);
+
+  // Set up session listener
+  const setupSessionListener = useCallback(() => {
     if (sessionListenerRef.current) return;
 
     sessionListenerRef.current = onSnapshot(
@@ -213,7 +347,10 @@ function VideoSession() {
           setParticipantNames(names);
           
           if (sessionData.status === 'completed' || sessionData.status === 'cancelled') {
-            handleSessionEnd();
+            setConnectionState(CONNECTION_STATES.ENDED);
+            setTimeout(() => {
+              navigate('/dashboard');
+            }, 2000);
           }
         }
       },
@@ -221,24 +358,21 @@ function VideoSession() {
         console.error('Session listener error:', error);
       }
     );
-  };
+  }, [sessionId, user?.displayName, user?.email, user?.uid, navigate]);
 
-  // BACKGROUND video loading (doesn't block session)
+  // Load video in background
   const loadVideoInBackground = async () => {
     try {
-      console.log('🎥 Loading video in background...');
+      console.log('🎥 Loading video...');
       
-      // Load Jitsi script
       if (!window.JitsiMeetExternalAPI) {
         await loadJitsiScript();
       }
 
       if (!mountedRef.current || !jitsiContainerRef.current) {
-        console.log('⚠️ Component unmounted, skipping video');
         return;
       }
 
-      // Create Jitsi room
       const roomName = `focusmate-${sessionId}`.replace(/[^a-zA-Z0-9-]/g, '');
       
       const options = {
@@ -255,7 +389,7 @@ function VideoSession() {
           startWithAudioMuted: true,
           startWithVideoMuted: true,
           enableClosePage: false,
-          disableInviteFunctions: false, // Enable invite functions for sharing
+          disableInviteFunctions: false,
           enableWelcomePage: false,
           requireDisplayName: true,
           defaultLanguage: 'en',
@@ -263,7 +397,6 @@ function VideoSession() {
           enableTalkWhileMuted: false,
           disableRemoteMute: false,
           enableAutomaticUrlCopy: false,
-          // Enable chat and other features
           disableChat: false,
           enableChat: true,
           enableReactions: true,
@@ -272,10 +405,8 @@ function VideoSession() {
           enableVirtualBackground: true,
           enableInsecureRoomNameWarning: false,
           enableNoAudioDetection: true,
-          enableNoisyMicDetection: true,
           enableOpusRed: true,
           enableSaveLogs: false,
-          enableTalkWhileMuted: false,
           enableUserRolesBasedOnToken: false
         },
         interfaceConfigOverwrite: {
@@ -286,89 +417,58 @@ function VideoSession() {
           ENABLE_MOBILE_BROWSER: true,
           HIDE_DEEP_LINKING_LOGO: true,
           TOOLBAR_ALWAYS_VISIBLE: true,
-          DISABLE_INVITE_FUNCTIONS: false, // Enable invite functions
+          DISABLE_INVITE_FUNCTIONS: false,
           DISABLE_DEEP_LINKING: true,
           DISABLE_JOIN_LEAVE_NOTIFICATIONS: false,
-          HIDE_INVITE_MORE_HEADER: false, // Show invite header
+          HIDE_INVITE_MORE_HEADER: false,
           SHOW_CHROME_EXTENSION_BANNER: false,
           VERTICAL_FILMSTRIP: false,
           TILE_VIEW_MAX_COLUMNS: 2,
-          // Enable all toolbar buttons including chat and screen share
           TOOLBAR_BUTTONS: isMobile ? [
             'microphone', 
             'camera', 
             'closedcaptions',
-            'desktop', // Screen share
-            'chat', // Chat
-            'participants-pane', // Participants
+            'desktop',
+            'chat',
+            'participants-pane',
             'tileview',
             'hangup'
           ] : [
             'microphone', 
             'camera', 
             'closedcaptions',
-            'desktop', // Screen share
+            'desktop',
             'fullscreen',
-            'fodeviceselection', // Device selection
+            'fodeviceselection',
             'hangup',
             'profile',
-            'chat', // Chat
-            'recording', // Recording (if enabled)
-            'livestreaming', // Live streaming (if enabled) 
-            'etherpad', // Collaborative document
-            'sharedvideo', // Shared video
-            'participants-pane', // Participants panel
-            'settings', // Settings
-            'raisehand', // Raise hand
-            'videoquality', // Video quality
-            'filmstrip', // Toggle filmstrip
-            'feedback', // Feedback
-            'stats', // Statistics
-            'shortcuts', // Keyboard shortcuts
-            'tileview', // Tile view
-            'videobackgroundblur', // Background blur
-            'download', // Download logs
-            'help', // Help
-            'mute-everyone', // Mute everyone (if moderator)
-            'security' // Security options
+            'chat',
+            'participants-pane',
+            'settings',
+            'raisehand',
+            'videoquality',
+            'filmstrip',
+            'tileview',
+            'videobackgroundblur'
           ],
-          // Chat settings
           CHAT_ENABLED: true,
           DISPLAY_WELCOME_PAGE_CONTENT: false,
           DISPLAY_WELCOME_PAGE_TOOLBAR_ADDITIONAL_CONTENT: false,
-          // Participant settings
           HIDE_PARTICIPANTS_STATS: false,
-          // Other useful settings
           DEFAULT_BACKGROUND: '#1e1b4b',
           OPTIMAL_BROWSERS: ['chrome', 'chromium', 'firefox', 'safari', 'webkit'],
-          UNSUPPORTED_BROWSERS: [],
-          // Mobile specific
-          ...(isMobile && {
-            TOOLBAR_BUTTONS: [
-              'microphone', 
-              'camera', 
-              'desktop', // Screen share on mobile
-              'chat', // Chat on mobile
-              'participants-pane', // Participants on mobile
-              'raisehand', // Raise hand
-              'tileview',
-              'hangup'
-            ]
-          })
+          UNSUPPORTED_BROWSERS: []
         }
       };
 
-      console.log('🔧 Creating Jitsi API...');
       apiRef.current = new window.JitsiMeetExternalAPI('meet.jit.si', options);
       
-      // Simple event listeners
-      setupSimpleVideoEvents();
+      setupVideoEvents();
       
-      // Mark video as ready after 2 seconds
       setTimeout(() => {
         if (mountedRef.current) {
           setVideoReady(true);
-          toast.success('📹 Video ready! Use chat, screen share & more tools available.');
+          toast.success('📹 Video ready!');
         }
       }, 2000);
       
@@ -381,7 +481,7 @@ function VideoSession() {
     }
   };
 
-  // Load Jitsi script (simple)
+  // Load Jitsi script
   const loadJitsiScript = () => {
     return new Promise((resolve, reject) => {
       if (window.JitsiMeetExternalAPI) {
@@ -397,21 +497,14 @@ function VideoSession() {
       script.onerror = () => reject(new Error('Failed to load video'));
       
       document.body.appendChild(script);
-      
-      setTimeout(() => {
-        if (!window.JitsiMeetExternalAPI) {
-          reject(new Error('Video load timeout'));
-        }
-      }, 10000);
     });
   };
 
-  // Simple video events
-  const setupSimpleVideoEvents = () => {
+  // Setup video events
+  const setupVideoEvents = () => {
     if (!apiRef.current) return;
 
     try {
-      // Participant events
       apiRef.current.addEventListener('participantJoined', (participant) => {
         const name = participant.displayName || 'Study partner';
         toast.success(`${name} joined! 🤝`);
@@ -422,7 +515,6 @@ function VideoSession() {
         toast(`${name} left the session`);
       });
 
-      // Ready to close
       apiRef.current.addEventListener('readyToClose', () => {
         endSession();
       });
@@ -432,7 +524,7 @@ function VideoSession() {
     }
   };
 
-  // Session management
+  // Manual end session
   const endSession = useCallback(async () => {
     if (!mountedRef.current) return;
 
@@ -441,92 +533,37 @@ function VideoSession() {
         await updateDoc(doc(db, 'sessions', sessionId), {
           status: 'completed',
           endedAt: serverTimestamp(),
-          actualDuration: session?.duration || 50
+          actualDuration: session?.duration || 50,
+          completedBy: userRole === 'creator' ? 'creator' : 'partner'
         });
       }
 
-      cleanup();
-      toast.success('Session completed! 🎉');
+      toast.success('Session ended! 🎉');
       navigate('/dashboard');
     } catch (error) {
       console.error('Error ending session:', error);
-      cleanup();
       navigate('/dashboard');
     }
-  }, [sessionId, session, navigate]);
+  }, [sessionId, session?.status, session?.duration, navigate, userRole]);
 
+  // Leave session (for non-creators)
   const leaveSession = useCallback(() => {
-    cleanup();
     navigate('/dashboard');
   }, [navigate]);
 
-  const handleSessionEnd = useCallback(() => {
-    setConnectionState(CONNECTION_STATES.ENDED);
-    setTimeout(() => {
-      cleanup();
-      navigate('/dashboard');
-    }, 2000);
-  }, [navigate]);
+  // Toggle timer
+  const toggleTimer = useCallback(() => {
+    if (timerPhase === 'ended') return;
+    
+    setTimerRunning(!timerRunning);
+    setTimerPhase(timerRunning ? 'paused' : 'running');
+    
+    toast(timerRunning ? 'Timer paused' : 'Timer resumed', {
+      icon: timerRunning ? '⏸️' : '▶️'
+    });
+  }, [timerRunning, timerPhase]);
 
-  // Simple cleanup
-  const cleanup = useCallback(() => {
-    console.log('🧹 Cleaning up...');
-
-    if (sessionListenerRef.current) {
-      sessionListenerRef.current();
-      sessionListenerRef.current = null;
-    }
-
-    if (timerIntervalRef.current) {
-      clearInterval(timerIntervalRef.current);
-      timerIntervalRef.current = null;
-    }
-
-    if (apiRef.current) {
-      try {
-        apiRef.current.dispose();
-      } catch (e) {
-        console.log('Cleanup error:', e);
-      }
-      apiRef.current = null;
-    }
-  }, []);
-
-  // Timer completion
-  const onTimerComplete = useCallback(() => {
-    toast.success('Time\'s up! 🎯');
-    setTimeout(endSession, 2000);
-  }, [endSession]);
-
-  // Retry session
-  const retrySession = useCallback(() => {
-    setError(null);
-    setConnectionState(CONNECTION_STATES.LOADING);
-    cleanup();
-    setTimeout(initializeSessionFast, 1000);
-  }, []);
-
-  // Get partner info
-  const partnerInfo = useMemo(() => {
-    if (!session) return { hasPartner: false, name: 'Loading...' };
-
-    if (!session.partnerId) {
-      return {
-        hasPartner: false,
-        name: 'Waiting for partner',
-        description: 'Others can join this session'
-      };
-    }
-
-    const isCreator = session.userId === user?.uid;
-    return {
-      hasPartner: true,
-      name: isCreator ? (session.partnerName || 'Study Partner') : (session.userName || 'Study Partner'),
-      description: 'Ready to focus together'
-    };
-  }, [session, user?.uid]);
-
-  // SIMPLE LOADING STATE
+  // Loading state
   if (connectionState === CONNECTION_STATES.LOADING) {
     return (
       <div className="video-session-loading">
@@ -558,7 +595,7 @@ function VideoSession() {
           <h2>Session Error</h2>
           <p>{error}</p>
           <div className="error-actions">
-            <button className="btn-primary" onClick={retrySession}>
+            <button className="btn-primary" onClick={() => window.location.reload()}>
               <FiRefreshCw /> Try Again
             </button>
             <button className="btn-secondary" onClick={() => navigate('/dashboard')}>
@@ -571,7 +608,7 @@ function VideoSession() {
   }
 
   // Session ended state
-  if (connectionState === CONNECTION_STATES.ENDED) {
+  if (connectionState === CONNECTION_STATES.ENDED || timerPhase === 'ended') {
     return (
       <div className="video-session-ended">
         <div className="ended-container">
@@ -594,10 +631,10 @@ function VideoSession() {
     );
   }
 
-  // MAIN SESSION VIEW - World-class clean interface
+  // Main session view
   return (
     <div className={`video-session ${isMobile ? 'mobile' : isTablet ? 'tablet' : 'desktop'}`}>
-      {/* Clean Header with inline timer */}
+      {/* Header with integrated timer */}
       <div className="video-header">
         <div className="session-info">
           <h3 className="session-title">{session?.goal || 'Focus Session'}</h3>
@@ -617,38 +654,50 @@ function VideoSession() {
         </div>
         
         <div className="header-actions">
-          {/* Inline Timer */}
+          {/* Enhanced inline timer */}
           <div 
-            className="header-timer"
-            style={{ '--progress': `${progress}%` }}
+            className={`header-timer ${timerPhase}`}
+            style={{ 
+              '--progress': `${progress}%`,
+              borderColor: getTimerColor(),
+              color: getTimerColor()
+            }}
           >
             <div className="timer-display">
               <div className={`timer-status ${!timerRunning ? 'paused' : ''}`}></div>
               <span className="timer-text">{formatTime(timeLeft)}</span>
             </div>
+            
+            {/* Timer controls */}
+            <button 
+              className="timer-control-btn"
+              onClick={toggleTimer}
+              title={timerRunning ? 'Pause timer' : 'Resume timer'}
+            >
+              {timerRunning ? <FiPause size={12} /> : <FiPlay size={12} />}
+            </button>
           </div>
 
-          {/* Leave/End Button */}
+          {/* End session button */}
           <button 
-            onClick={userRole === 'creator' ? endSession : leaveSession} 
+            onClick={() => setShowEndConfirmation(true)}
             className="btn-leave"
             title={userRole === 'creator' ? 'End session' : 'Leave session'}
           >
-            {userRole === 'creator' ? <FiX /> : <FiArrowLeft />}
+            {userRole === 'creator' ? <FiStopCircle /> : <FiArrowLeft />}
           </button>
         </div>
       </div>
 
-      {/* Full Screen Video */}
+      {/* Full screen video */}
       <div className="video-content">
         <div className="video-container">
           <div ref={jitsiContainerRef} className="jitsi-container">
-            {/* Loading overlay only when video not ready */}
             {!videoReady && (
               <div className="video-overlay">
                 <div className="session-active-icon">🎯</div>
                 <h3>Focus Session Active</h3>
-                <p>Your session has started! Video is loading with chat, screen share & collaboration tools...</p>
+                <p>Video loading with collaboration tools...</p>
                 
                 <div className="session-details">
                   <div className="detail">
@@ -657,25 +706,27 @@ function VideoSession() {
                   </div>
                   <div className="detail">
                     <strong>Time Left:</strong>
-                    <span>{formatTime(timeLeft)}</span>
+                    <span style={{ color: getTimerColor() }}>{formatTime(timeLeft)}</span>
                   </div>
                   <div className="detail">
-                    <strong>Participants:</strong>
-                    <span>{participantCount}/2</span>
+                    <strong>Progress:</strong>
+                    <span>{Math.round(progress)}%</span>
                   </div>
                   <div className="detail">
-                    <strong>Status:</strong>
-                    <span>{partnerInfo.description}</span>
+                    <strong>Phase:</strong>
+                    <span style={{ color: getTimerColor() }}>
+                      {timerPhase === 'warning' ? 'Final stretch!' : 
+                       timerPhase === 'ending' ? 'Almost done!' : 
+                       'Deep focus'}
+                    </span>
                   </div>
                 </div>
 
                 <div className="loading-progress">
                   <div className="progress-bar">
-                    <div className="progress-fill" style={{ 
-                      width: videoReady ? '100%' : '70%'
-                    }}></div>
+                    <div className="progress-fill" style={{ width: '70%' }}></div>
                   </div>
-                  <p>Loading video chat, screen share, and collaboration tools...</p>
+                  <p>Loading video tools...</p>
                 </div>
               </div>
             )}
@@ -683,31 +734,76 @@ function VideoSession() {
         </div>
       </div>
 
-      {/* Bottom Status Bar */}
+      {/* Bottom status bar */}
       <div className="bottom-status">
         <div className="status-indicator">
-          <div className="status-icon">💡</div>
+          <div className="status-icon">
+            {timerPhase === 'warning' ? '⚠️' : 
+             timerPhase === 'ending' ? '🚨' : '💡'}
+          </div>
           <div className="status-text">
-            <strong>Focus Tip:</strong> Eliminate distractions for maximum productivity
+            <strong>
+              {timerPhase === 'warning' ? 'Final 5 minutes!' : 
+               timerPhase === 'ending' ? 'Last minute!' : 
+               'Focus Mode Active'}
+            </strong>
           </div>
         </div>
         
-        {partnerInfo.hasPartner && (
+        {participantCount > 1 ? (
           <div className="partner-status">
             <div className="partner-avatar">
-              {partnerInfo.name.charAt(0).toUpperCase()}
+              {participantNames[1]?.charAt(0).toUpperCase() || 'P'}
             </div>
-            <span>With {partnerInfo.name}</span>
+            <span>With {participantNames[1] || 'Partner'}</span>
           </div>
-        )}
-        
-        {!partnerInfo.hasPartner && (
+        ) : (
           <div className="partner-status">
             <div className="partner-avatar">⏳</div>
-            <span>Waiting for partner</span>
+            <span>Solo session</span>
           </div>
         )}
       </div>
+
+      {/* Auto-end warning */}
+      {autoEndWarning && (
+        <div className="auto-end-warning">
+          <div className="warning-content">
+            <FiAlertCircle />
+            <span>Session will end automatically when timer reaches 0</span>
+            <button onClick={() => setAutoEndWarning(false)}>×</button>
+          </div>
+        </div>
+      )}
+
+      {/* End session confirmation */}
+      {showEndConfirmation && (
+        <div className="modal-overlay">
+          <div className="end-session-modal">
+            <h3>{userRole === 'creator' ? 'End Session?' : 'Leave Session?'}</h3>
+            <p>
+              {userRole === 'creator' 
+                ? 'This will end the session for all participants.' 
+                : 'You can rejoin if the session is still active.'}
+            </p>
+            <div className="session-summary">
+              <div>Time elapsed: {formatTime(totalTime - timeLeft)}</div>
+              <div>Time remaining: {formatTime(timeLeft)}</div>
+            </div>
+            <div className="modal-actions">
+              <button className="btn-secondary" onClick={() => setShowEndConfirmation(false)}>
+                Cancel
+              </button>
+              <button 
+                className="btn-primary"
+                onClick={userRole === 'creator' ? endSession : leaveSession}
+              >
+                {userRole === 'creator' ? 'End Session' : 'Leave Session'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

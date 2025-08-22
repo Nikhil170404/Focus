@@ -14,7 +14,8 @@ import {
   FiActivity,
   FiTarget,
   FiCalendar,
-  FiAlertCircle
+  FiAlertCircle,
+  FiLock
 } from 'react-icons/fi';
 
 // Session status configuration
@@ -23,7 +24,7 @@ const SESSION_STATUS = {
     icon: FiClock,
     label: 'Scheduled',
     color: '#6366f1',
-    canJoin: true // CHANGED: Always allow joining scheduled sessions
+    canJoin: false // Will be determined by timing logic
   },
   active: {
     icon: FiPlay,
@@ -67,9 +68,13 @@ const PARTNER_STATUS = {
   }
 };
 
+// Timing constants
+const JOIN_WINDOW_MINUTES = 10; // Allow joining 10 minutes before session
+const LATE_JOIN_MINUTES = 15; // Allow late joining up to 15 minutes after start
+
 function SessionCard({ session, completed = false, compact = false, showActions = true }) {
   const navigate = useNavigate();
-  const { user } = useAuth(); // Add useAuth hook
+  const { user } = useAuth();
   const [showJoinModal, setShowJoinModal] = useState(false);
 
   // Memoized calculations for performance
@@ -91,6 +96,66 @@ function SessionCard({ session, completed = false, compact = false, showActions 
       return null;
     }
   }, [session?.endedAt]);
+
+  // IMPROVED: Smart timing logic for join button
+  const timingInfo = useMemo(() => {
+    if (!sessionTime || completed) return { canJoin: false, status: 'completed', message: 'Session completed' };
+    
+    const now = new Date();
+    const timeDiffMinutes = (sessionTime - now) / (1000 * 60);
+    const sessionDurationMinutes = session?.duration || 50;
+    const sessionEndTime = new Date(sessionTime.getTime() + sessionDurationMinutes * 60 * 1000);
+    const timeAfterEndMinutes = (now - sessionEndTime) / (1000 * 60);
+    
+    // Session hasn't started yet
+    if (timeDiffMinutes > JOIN_WINDOW_MINUTES) {
+      return {
+        canJoin: false,
+        status: 'too_early',
+        message: `Opens in ${Math.ceil(timeDiffMinutes - JOIN_WINDOW_MINUTES)} minutes`,
+        timeUntil: formatDistanceToNow(new Date(sessionTime.getTime() - JOIN_WINDOW_MINUTES * 60 * 1000), { addSuffix: true }),
+        icon: FiLock,
+        color: '#6b7280'
+      };
+    }
+    
+    // Within join window (10 min before to 15 min after start)
+    if (timeDiffMinutes > -LATE_JOIN_MINUTES) {
+      const isLive = timeDiffMinutes <= 0;
+      return {
+        canJoin: true,
+        status: isLive ? 'live' : 'ready',
+        message: isLive ? 'Session is LIVE!' : 'Ready to join!',
+        timeUntil: isLive ? `Started ${formatDistanceToNow(sessionTime)} ago` : `Starts ${formatDistanceToNow(sessionTime, { addSuffix: true })}`,
+        icon: FiPlay,
+        color: isLive ? '#10b981' : '#6366f1',
+        isLive
+      };
+    }
+    
+    // Session ended or too late to join
+    if (timeAfterEndMinutes > 0) {
+      return {
+        canJoin: false,
+        status: 'ended',
+        message: 'Session ended',
+        timeUntil: `Ended ${formatDistanceToNow(sessionEndTime)} ago`,
+        icon: FiCheck,
+        color: '#6b7280'
+      };
+    }
+    
+    // Late join window (session started but still ongoing)
+    return {
+      canJoin: true,
+      status: 'late_join',
+      message: 'Join late (session in progress)',
+      timeUntil: `Started ${formatDistanceToNow(sessionTime)} ago`,
+      icon: FiPlay,
+      color: '#f59e0b',
+      isLate: true
+    };
+  }, [sessionTime, completed, session?.duration]);
 
   // Format session date/time
   const formattedTime = useMemo(() => {
@@ -117,18 +182,7 @@ function SessionCard({ session, completed = false, compact = false, showActions 
     return mins > 0 ? `${hours}h ${mins}m` : `${hours}h`;
   }, [session?.actualDuration, session?.duration]);
 
-  // Time until session starts
-  const timeUntilStart = useMemo(() => {
-    if (!sessionTime || completed || sessionTime <= new Date()) return null;
-    
-    try {
-      return formatDistanceToNow(sessionTime, { addSuffix: true });
-    } catch {
-      return null;
-    }
-  }, [sessionTime, completed]);
-
-  // Partner status - FIXED to show correct partner info
+  // Partner status - Fixed to show correct partner info
   const partnerInfo = useMemo(() => {
     if (!session?.partnerId) {
       return {
@@ -144,7 +198,6 @@ function SessionCard({ session, completed = false, compact = false, showActions 
     const isCurrentUserPartner = session.partnerId === user?.uid;
     
     if (isCurrentUserCreator) {
-      // Current user is creator, show partner info
       return {
         hasPartner: true,
         name: session.partnerName || 'Study Partner',
@@ -152,7 +205,6 @@ function SessionCard({ session, completed = false, compact = false, showActions 
         status: PARTNER_STATUS.confirmed
       };
     } else if (isCurrentUserPartner) {
-      // Current user is partner, show creator info  
       return {
         hasPartner: true,
         name: session.userName || 'Study Partner',
@@ -160,7 +212,6 @@ function SessionCard({ session, completed = false, compact = false, showActions 
         status: PARTNER_STATUS.confirmed
       };
     } else {
-      // Current user is neither creator nor partner (shouldn't happen)
       return {
         hasPartner: true,
         name: 'Study Partner',
@@ -170,40 +221,17 @@ function SessionCard({ session, completed = false, compact = false, showActions 
     }
   }, [session?.partnerId, session?.partnerName, session?.partnerPhoto, session?.userName, session?.userPhoto, session?.userId, user?.uid]);
 
-  // Legacy partner status for backward compatibility
-  const partnerStatus = partnerInfo.status;
-
   // Session status
   const sessionStatus = useMemo(() => {
     return SESSION_STATUS[session?.status] || SESSION_STATUS.scheduled;
   }, [session?.status]);
 
-  // SIMPLIFIED: Always allow joining scheduled sessions
-  const canJoin = useMemo(() => {
-    if (completed) return false;
-    return session?.status === 'scheduled' || session?.status === 'active';
-  }, [session?.status, completed]);
-
-  // Get time status - SIMPLIFIED
-  const getTimeStatus = useMemo(() => {
-    if (!sessionTime || completed) return null;
-    
-    const now = new Date();
-    const timeDiff = sessionTime - now;
-    
-    if (timeDiff > 0) {
-      return { type: 'ready', message: 'Ready to join!' };
-    } else {
-      return { type: 'ready', message: 'Join now!' };
-    }
-  }, [sessionTime, completed]);
-
   // Handle join session with confirmation
   const handleJoinSession = useCallback(() => {
-    if (!canJoin) return;
+    if (!timingInfo.canJoin) return;
     
     setShowJoinModal(true);
-  }, [canJoin]);
+  }, [timingInfo.canJoin]);
 
   // Confirm join and navigate
   const confirmJoin = useCallback(() => {
@@ -214,18 +242,16 @@ function SessionCard({ session, completed = false, compact = false, showActions 
   // Handle session view for completed sessions
   const handleSessionAction = useCallback(() => {
     if (completed) {
-      // Could show session details/review
       console.log('Show session details');
       return;
     }
 
-    if (canJoin) {
+    if (timingInfo.canJoin) {
       handleJoinSession();
     } else {
-      // Show session details or countdown
       console.log('Show session preview');
     }
-  }, [completed, canJoin, handleJoinSession]);
+  }, [completed, timingInfo.canJoin, handleJoinSession]);
 
   // Get card classes
   const cardClasses = useMemo(() => {
@@ -235,13 +261,13 @@ function SessionCard({ session, completed = false, compact = false, showActions 
     if (compact) classes.push('compact');
     if (!partnerInfo.hasPartner) classes.push('waiting-partner');
     if (partnerInfo.hasPartner) classes.push('has-partner');
-    if (canJoin) classes.push('can-join');
-    if (getTimeStatus?.type) classes.push(`time-${getTimeStatus.type}`);
+    if (timingInfo.canJoin) classes.push('can-join');
+    if (timingInfo.status) classes.push(`timing-${timingInfo.status}`);
     
     return classes.join(' ');
-  }, [completed, compact, partnerInfo.hasPartner, canJoin, getTimeStatus]);
+  }, [completed, compact, partnerInfo.hasPartner, timingInfo]);
 
-  // Render partner info - FIXED to show correct partner
+  // Render partner info
   const renderPartnerInfo = () => (
     <div className={`session-partner ${partnerInfo.status.className}`}>
       <div className="partner-avatar">
@@ -261,7 +287,6 @@ function SessionCard({ session, completed = false, compact = false, showActions 
           </div>
         )}
         
-        {/* Online indicator for confirmed partners */}
         {partnerInfo.hasPartner && (
           <div className="online-indicator" />
         )}
@@ -292,7 +317,7 @@ function SessionCard({ session, completed = false, compact = false, showActions 
     </div>
   );
 
-  // Render session actions
+  // IMPROVED: Render session actions with smart timing
   const renderActions = () => {
     if (!showActions) return null;
 
@@ -319,30 +344,28 @@ function SessionCard({ session, completed = false, compact = false, showActions 
       );
     }
 
-    const timeStatus = getTimeStatus;
-
     return (
       <div className="session-actions">
-        {canJoin ? (
+        {timingInfo.canJoin ? (
           <button 
-            className="btn-session btn-primary"
+            className={`btn-session ${timingInfo.isLive ? 'btn-success' : 'btn-primary'} ${timingInfo.isLate ? 'btn-warning' : ''}`}
             onClick={handleJoinSession}
             title={partnerInfo.hasPartner ? 'Join focus session' : 'Enter session room'}
           >
-            <FiVideo size={16} />
-            <span>Join Session</span>
+            <timingInfo.icon size={16} />
+            <span>{timingInfo.isLive ? 'Join LIVE' : timingInfo.isLate ? 'Join Late' : 'Join Session'}</span>
           </button>
-        ) : timeStatus ? (
-          <div className={`session-countdown ${timeStatus.type}`}>
-            <FiPlay size={14} />
-            <span>{timeStatus.message}</span>
-          </div>
         ) : (
-          <div className="session-waiting">
-            <sessionStatus.icon size={14} />
-            <span>{sessionStatus.label}</span>
+          <div className={`session-timing-status ${timingInfo.status}`} style={{ color: timingInfo.color }}>
+            <timingInfo.icon size={14} />
+            <span>{timingInfo.message}</span>
           </div>
         )}
+        
+        {/* Time info */}
+        <div className="session-time-info">
+          <span className="time-until">{timingInfo.timeUntil}</span>
+        </div>
         
         {/* Waiting indicator for sessions without partners */}
         {!partnerInfo.hasPartner && !completed && (
@@ -363,9 +386,9 @@ function SessionCard({ session, completed = false, compact = false, showActions 
     <>
       <div className={cardClasses} onClick={handleSessionAction}>
         {/* Time status indicator */}
-        {getTimeStatus && (
-          <div className={`time-status-indicator ${getTimeStatus.type}`}>
-            🟢
+        {timingInfo.canJoin && (
+          <div className={`time-status-indicator ${timingInfo.status}`} style={{ backgroundColor: timingInfo.color }}>
+            {timingInfo.isLive ? '🔴' : '🟢'}
           </div>
         )}
 
@@ -378,11 +401,6 @@ function SessionCard({ session, completed = false, compact = false, showActions 
             <FiClock size={14} />
             <span>{formattedDuration}</span>
           </div>
-          {timeUntilStart && !completed && (
-            <div className="time-until">
-              {timeUntilStart}
-            </div>
-          )}
         </div>
         
         {/* Session content */}
@@ -412,16 +430,20 @@ function SessionCard({ session, completed = false, compact = false, showActions 
         {/* Status indicator */}
         <div 
           className="session-status-indicator"
-          style={{ backgroundColor: sessionStatus.color }}
+          style={{ backgroundColor: timingInfo.color || sessionStatus.color }}
         />
       </div>
 
-      {/* Join Confirmation Modal */}
+      {/* IMPROVED: Join Confirmation Modal with timing info */}
       {showJoinModal && (
         <div className="modal-overlay" onClick={() => setShowJoinModal(false)}>
           <div className="join-modal" onClick={(e) => e.stopPropagation()}>
             <div className="modal-header">
-              <h3>Join Focus Session</h3>
+              <h3>
+                {timingInfo.isLive ? '🔴 Join Live Session' : 
+                 timingInfo.isLate ? '⏰ Join Session (In Progress)' : 
+                 '🎯 Join Focus Session'}
+              </h3>
               <button 
                 className="modal-close"
                 onClick={() => setShowJoinModal(false)}
@@ -431,6 +453,13 @@ function SessionCard({ session, completed = false, compact = false, showActions 
             </div>
             
             <div className="modal-content">
+              {timingInfo.isLate && (
+                <div className="late-join-warning">
+                  <FiAlertCircle />
+                  <span>This session is already in progress. You can still join!</span>
+                </div>
+              )}
+              
               <div className="session-preview">
                 <div className="preview-item">
                   <FiCalendar />
@@ -450,6 +479,10 @@ function SessionCard({ session, completed = false, compact = false, showActions 
                     <span>With {partnerInfo.name}</span>
                   </div>
                 )}
+                <div className="preview-item">
+                  <timingInfo.icon />
+                  <span style={{ color: timingInfo.color }}>{timingInfo.message}</span>
+                </div>
               </div>
 
               <div className="join-checklist">
@@ -471,11 +504,11 @@ function SessionCard({ session, completed = false, compact = false, showActions 
                 Cancel
               </button>
               <button 
-                className="btn-primary"
+                className={`btn-primary ${timingInfo.isLive ? 'btn-success' : ''}`}
                 onClick={confirmJoin}
               >
                 <FiVideo />
-                Join Session
+                {timingInfo.isLive ? 'Join Live Session' : 'Join Session'}
               </button>
             </div>
           </div>
@@ -485,5 +518,4 @@ function SessionCard({ session, completed = false, compact = false, showActions 
   );
 }
 
-// Memoize the component to prevent unnecessary re-renders
 export default React.memo(SessionCard);
