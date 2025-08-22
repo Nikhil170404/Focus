@@ -124,182 +124,157 @@ function Dashboard() {
     }
   ], [navigate]);
 
+  // FIXED: Better session categorization logic
+  const categorizeSession = useCallback((session) => {
+    if (!session.startTime) return 'recent';
+    
+    const now = new Date();
+    const startTime = new Date(session.startTime);
+    const endTime = session.endTime ? new Date(session.endTime) : new Date(startTime.getTime() + (session.duration || 50) * 60 * 1000);
+    
+    // If session is explicitly completed or cancelled
+    if (session.status === 'completed' || session.status === 'cancelled') {
+      return 'recent';
+    }
+    
+    // If session has ended (past end time), it should be recent
+    if (now > endTime) {
+      return 'recent';
+    }
+    
+    // If session is in the future or currently active
+    if (session.status === 'scheduled' || session.status === 'active') {
+      return 'upcoming';
+    }
+    
+    // Default to recent for any other case
+    return 'recent';
+  }, []);
+
   // Set up real-time listeners for sessions
   const setupRealTimeListeners = useCallback(() => {
     if (!user?.uid) return;
 
-    console.log('Setting up real-time listeners...');
+    console.log('🚀 Setting up real-time listeners...');
 
-    // Listen for upcoming sessions - FIXED QUERY
-    const upcomingQuery = query(
+    // Clean up existing listeners
+    if (unsubscribeUpcoming) {
+      unsubscribeUpcoming();
+      setUnsubscribeUpcoming(null);
+    }
+    if (unsubscribeCompleted) {
+      unsubscribeCompleted();
+      setUnsubscribeCompleted(null);
+    }
+
+    // Listen for all user sessions
+    const userSessionsQuery = query(
       collection(db, 'sessions'),
-      where('status', 'in', ['scheduled']),
-      orderBy('startTime', 'asc'),
-      limit(20)
-    );
-
-    const unsubUpcoming = onSnapshot(upcomingQuery, 
-      (snapshot) => {
-        const allSessions = snapshot.docs.map(doc => ({
-          id: doc.id,
-          ...doc.data()
-        }));
-        
-        // Filter on client side for sessions user is involved in
-        const userSessions = allSessions.filter(session => 
-          session.userId === user.uid || 
-          session.partnerId === user.uid ||
-          (session.participants && session.participants.includes(user.uid))
-        );
-        
-        console.log('Upcoming sessions updated:', userSessions.length);
-        setUpcomingSessions(userSessions);
-      },
-      (error) => {
-        console.error('Error listening to upcoming sessions:', error);
-        // Fallback to polling
-        fetchUpcomingSessions();
-      }
-    );
-
-    // Listen for completed sessions - FIXED QUERY  
-    const completedQuery = query(
-      collection(db, 'sessions'),
-      where('status', '==', 'completed'),
-      orderBy('endedAt', 'desc'),
+      orderBy('startTime', 'desc'),
       limit(50)
     );
 
-    const unsubCompleted = onSnapshot(completedQuery, 
+    const unsubUserSessions = onSnapshot(userSessionsQuery, 
       (snapshot) => {
         const allSessions = snapshot.docs.map(doc => ({
           id: doc.id,
           ...doc.data()
         }));
         
-        // Filter on client side for sessions user was involved in
+        // Filter for sessions user is involved in
         const userSessions = allSessions.filter(session => 
           session.userId === user.uid || 
           session.partnerId === user.uid ||
           (session.participants && session.participants.includes(user.uid))
         );
         
-        console.log('Completed sessions updated:', userSessions.length);
-        setRecentSessions(userSessions.slice(0, 5));
+        console.log('📊 Total user sessions found:', userSessions.length);
+        
+        // Categorize sessions
+        const upcoming = [];
+        const recent = [];
+        
+        userSessions.forEach(session => {
+          const category = categorizeSession(session);
+          if (category === 'upcoming') {
+            upcoming.push(session);
+          } else {
+            recent.push(session);
+          }
+        });
+        
+        // Sort upcoming by start time (soonest first)
+        upcoming.sort((a, b) => new Date(a.startTime) - new Date(b.startTime));
+        
+        // Sort recent by end time or completion time (most recent first)
+        recent.sort((a, b) => {
+          const timeA = a.endedAt ? (a.endedAt.toDate ? a.endedAt.toDate() : new Date(a.endedAt)) : new Date(a.startTime);
+          const timeB = b.endedAt ? (b.endedAt.toDate ? b.endedAt.toDate() : new Date(b.endedAt)) : new Date(b.startTime);
+          return timeB - timeA;
+        });
+        
+        console.log('📈 Upcoming sessions:', upcoming.length);
+        console.log('📋 Recent sessions:', recent.length);
+        
+        setUpcomingSessions(upcoming);
+        setRecentSessions(recent.slice(0, 10)); // Limit recent to 10
         
         // Calculate stats from completed sessions
-        const calculatedStats = calculateStats(userSessions);
+        const completedSessions = userSessions.filter(s => s.status === 'completed');
+        const calculatedStats = calculateStats(completedSessions);
         setStats(calculatedStats);
         
         // Update user stats in background
         updateUserStats(calculatedStats).catch(console.error);
       },
       (error) => {
-        console.error('Error listening to completed sessions:', error);
-        // Fallback to polling
-        fetchCompletedSessions();
+        console.error('❌ Error listening to sessions:', error);
+        toast.error('Failed to load sessions. Please refresh.');
       }
     );
 
-    setUnsubscribeUpcoming(() => unsubUpcoming);
-    setUnsubscribeCompleted(() => unsubCompleted);
+    setUnsubscribeUpcoming(() => unsubUserSessions);
+    setUnsubscribeCompleted(() => unsubUserSessions); // Using same listener
 
     return () => {
-      unsubUpcoming();
-      unsubCompleted();
+      unsubUserSessions();
     };
-  }, [user?.uid]);
+  }, [user?.uid, categorizeSession]);
 
-  // Fetch upcoming sessions (fallback)
-  const fetchUpcomingSessions = async () => {
+  // FIXED: Proper refresh functionality
+  const handleRefresh = useCallback(async () => {
+    if (refreshing) return; // Prevent multiple simultaneous refreshes
+    
+    setRefreshing(true);
+    console.log('🔄 Refreshing dashboard data...');
+    
     try {
-      const now = new Date();
-      const q = query(
-        collection(db, 'sessions'),
-        where('status', 'in', ['scheduled']),
-        orderBy('startTime', 'asc'),
-        limit(20)
-      );
-
-      const snapshot = await getDocs(q);
-      const allSessions = snapshot.docs.map(doc => ({
-        id: doc.id,
-        ...doc.data()
-      }));
+      // Force refresh by clearing cache and re-setting up listeners
+      setLastFetch(0);
       
-      // Filter for user's sessions
-      const userSessions = allSessions.filter(session => 
-        session.userId === user.uid || 
-        session.partnerId === user.uid ||
-        (session.participants && session.participants.includes(user.uid))
-      );
-      
-      return userSessions;
-    } catch (error) {
-      console.error('Error fetching upcoming sessions:', error);
-      return [];
-    }
-  };
-
-  // Fetch completed sessions (fallback)
-  const fetchCompletedSessions = async () => {
-    try {
-      const q = query(
-        collection(db, 'sessions'),
-        where('status', '==', 'completed'),
-        orderBy('endedAt', 'desc'),
-        limit(50)
-      );
-
-      const snapshot = await getDocs(q);
-      const allSessions = snapshot.docs.map(doc => ({
-        id: doc.id,
-        ...doc.data()
-      }));
-      
-      // Filter for user's sessions
-      const userSessions = allSessions.filter(session => 
-        session.userId === user.uid || 
-        session.partnerId === user.uid ||
-        (session.participants && session.participants.includes(user.uid))
-      );
-      
-      return userSessions;
-    } catch (error) {
-      console.error('Error fetching completed sessions:', error);
-      return [];
-    }
-  };
-
-  // Optimized data fetching with real-time updates
-  const fetchUserData = useCallback(async (forceRefresh = false) => {
-    if (!user?.uid) return;
-
-    const now = Date.now();
-    if (!forceRefresh && (now - lastFetch) < CACHE_DURATION) {
-      return; // Use cached data
-    }
-
-    try {
-      setLoading(!forceRefresh);
-      if (forceRefresh) setRefreshing(true);
-
-      // Use real-time listeners for primary data
-      if (!unsubscribeUpcoming && !unsubscribeCompleted) {
-        const cleanup = setupRealTimeListeners();
-        return cleanup;
+      // Re-setup listeners to get fresh data
+      if (unsubscribeUpcoming) {
+        unsubscribeUpcoming();
+        setUnsubscribeUpcoming(null);
+      }
+      if (unsubscribeCompleted) {
+        unsubscribeCompleted();
+        setUnsubscribeCompleted(null);
       }
       
-      setLastFetch(now);
-
+      // Set up fresh listeners
+      setupRealTimeListeners();
+      
+      // Show success message
+      toast.success('Dashboard refreshed!');
+      
     } catch (error) {
-      console.error('Error fetching dashboard data:', error);
-      toast.error('Failed to load data. Please try again.');
+      console.error('❌ Error refreshing dashboard:', error);
+      toast.error('Failed to refresh. Please try again.');
     } finally {
-      setLoading(false);
       setRefreshing(false);
     }
-  }, [user?.uid, lastFetch, unsubscribeUpcoming, unsubscribeCompleted, setupRealTimeListeners]);
+  }, [refreshing, setupRealTimeListeners, unsubscribeUpcoming, unsubscribeCompleted]);
 
   // Optimized stats calculation
   const calculateStats = useCallback((sessions) => {
@@ -469,9 +444,8 @@ function Dashboard() {
   useEffect(() => {
     if (user?.uid) {
       ensureUserDocument().then(() => {
-        const cleanup = setupRealTimeListeners();
+        setupRealTimeListeners();
         setLoading(false);
-        return cleanup;
       });
     }
 
@@ -499,12 +473,6 @@ function Dashboard() {
     return () => clearTimeout(timeout);
   }, [loading]);
 
-  // Handle refresh
-  const handleRefresh = useCallback(() => {
-    fetchUserData(true);
-    toast.success('Data refreshed!');
-  }, [fetchUserData]);
-
   // Handle quick action
   const handleQuickAction = useCallback((action) => {
     action.action();
@@ -531,7 +499,7 @@ function Dashboard() {
           
           <div className="header-actions">
             <button 
-              className="refresh-button"
+              className={`refresh-button ${refreshing ? 'refreshing' : ''}`}
               onClick={handleRefresh}
               disabled={refreshing}
               title="Refresh data"
@@ -647,7 +615,7 @@ function Dashboard() {
               className={`tab-button ${activeTab === 'recent' ? 'active' : ''}`}
               onClick={() => setActiveTab('recent')}
             >
-              Recent
+              Recent ({recentSessions.length})
             </button>
           </div>
         </div>

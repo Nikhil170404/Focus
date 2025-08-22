@@ -1,4 +1,4 @@
-import React, { useMemo, useCallback, useState } from 'react';
+import React, { useMemo, useCallback, useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { format, formatDistanceToNow, isToday, isTomorrow, isYesterday } from 'date-fns';
 import { useAuth } from '../../hooks/useAuth';
@@ -15,7 +15,8 @@ import {
   FiTarget,
   FiCalendar,
   FiAlertCircle,
-  FiLock
+  FiLock,
+  FiPause
 } from 'react-icons/fi';
 
 // Session status configuration
@@ -76,6 +77,16 @@ function SessionCard({ session, completed = false, compact = false, showActions 
   const navigate = useNavigate();
   const { user } = useAuth();
   const [showJoinModal, setShowJoinModal] = useState(false);
+  const [currentTime, setCurrentTime] = useState(new Date());
+
+  // Update current time every minute for accurate timing
+  useEffect(() => {
+    const interval = setInterval(() => {
+      setCurrentTime(new Date());
+    }, 60000); // Update every minute
+
+    return () => clearInterval(interval);
+  }, []);
 
   // Memoized calculations for performance
   const sessionTime = useMemo(() => {
@@ -99,13 +110,52 @@ function SessionCard({ session, completed = false, compact = false, showActions 
 
   // IMPROVED: Smart timing logic for join button
   const timingInfo = useMemo(() => {
-    if (!sessionTime || completed) return { canJoin: false, status: 'completed', message: 'Session completed' };
+    if (!sessionTime) return { canJoin: false, status: 'invalid', message: 'Invalid session time' };
     
-    const now = new Date();
+    // If explicitly completed, always show as completed
+    if (completed || session?.status === 'completed') {
+      return { canJoin: false, status: 'completed', message: 'Session completed' };
+    }
+
+    // If cancelled
+    if (session?.status === 'cancelled') {
+      return { canJoin: false, status: 'cancelled', message: 'Session cancelled' };
+    }
+    
+    const now = currentTime;
     const timeDiffMinutes = (sessionTime - now) / (1000 * 60);
     const sessionDurationMinutes = session?.duration || 50;
     const sessionEndTime = new Date(sessionTime.getTime() + sessionDurationMinutes * 60 * 1000);
     const timeAfterEndMinutes = (now - sessionEndTime) / (1000 * 60);
+    
+    // Session has ended (past end time) - should be in recent
+    if (timeAfterEndMinutes > 0) {
+      return {
+        canJoin: false,
+        status: 'ended',
+        message: 'Session ended',
+        timeUntil: `Ended ${formatDistanceToNow(sessionEndTime)} ago`,
+        icon: FiCheck,
+        color: '#6b7280'
+      };
+    }
+    
+    // Session is currently active (started but not ended)
+    if (timeDiffMinutes <= 0 && timeAfterEndMinutes <= 0) {
+      const minutesRunning = Math.abs(timeDiffMinutes);
+      const canStillJoin = minutesRunning <= LATE_JOIN_MINUTES;
+      
+      return {
+        canJoin: canStillJoin,
+        status: canStillJoin ? 'live' : 'too_late',
+        message: canStillJoin ? 'Session is LIVE!' : 'Too late to join',
+        timeUntil: `Started ${formatDistanceToNow(sessionTime)} ago`,
+        icon: canStillJoin ? FiPlay : FiLock,
+        color: canStillJoin ? '#10b981' : '#6b7280',
+        isLive: true,
+        isLate: minutesRunning > 5
+      };
+    }
     
     // Session hasn't started yet
     if (timeDiffMinutes > JOIN_WINDOW_MINUTES) {
@@ -119,43 +169,17 @@ function SessionCard({ session, completed = false, compact = false, showActions 
       };
     }
     
-    // Within join window (10 min before to 15 min after start)
-    if (timeDiffMinutes > -LATE_JOIN_MINUTES) {
-      const isLive = timeDiffMinutes <= 0;
-      return {
-        canJoin: true,
-        status: isLive ? 'live' : 'ready',
-        message: isLive ? 'Session is LIVE!' : 'Ready to join!',
-        timeUntil: isLive ? `Started ${formatDistanceToNow(sessionTime)} ago` : `Starts ${formatDistanceToNow(sessionTime, { addSuffix: true })}`,
-        icon: FiPlay,
-        color: isLive ? '#10b981' : '#6366f1',
-        isLive
-      };
-    }
-    
-    // Session ended or too late to join
-    if (timeAfterEndMinutes > 0) {
-      return {
-        canJoin: false,
-        status: 'ended',
-        message: 'Session ended',
-        timeUntil: `Ended ${formatDistanceToNow(sessionEndTime)} ago`,
-        icon: FiCheck,
-        color: '#6b7280'
-      };
-    }
-    
-    // Late join window (session started but still ongoing)
+    // Within join window (can join now)
     return {
       canJoin: true,
-      status: 'late_join',
-      message: 'Join late (session in progress)',
-      timeUntil: `Started ${formatDistanceToNow(sessionTime)} ago`,
+      status: 'ready',
+      message: 'Ready to join!',
+      timeUntil: `Starts ${formatDistanceToNow(sessionTime, { addSuffix: true })}`,
       icon: FiPlay,
-      color: '#f59e0b',
-      isLate: true
+      color: '#6366f1'
     };
-  }, [sessionTime, completed, session?.duration]);
+    
+  }, [sessionTime, completed, session?.status, session?.duration, currentTime]);
 
   // Format session date/time
   const formattedTime = useMemo(() => {
@@ -321,7 +345,7 @@ function SessionCard({ session, completed = false, compact = false, showActions 
   const renderActions = () => {
     if (!showActions) return null;
 
-    if (completed) {
+    if (completed || session?.status === 'completed') {
       return (
         <div className="session-status completed">
           <FiCheck size={16} />
@@ -340,6 +364,16 @@ function SessionCard({ session, completed = false, compact = false, showActions 
         <div className="session-status cancelled">
           <FiX size={16} />
           <span>Cancelled</span>
+        </div>
+      );
+    }
+
+    // For ended sessions that aren't explicitly completed
+    if (timingInfo.status === 'ended') {
+      return (
+        <div className="session-status ended">
+          <FiCheck size={16} />
+          <span>Ended</span>
         </div>
       );
     }
@@ -368,7 +402,7 @@ function SessionCard({ session, completed = false, compact = false, showActions 
         </div>
         
         {/* Waiting indicator for sessions without partners */}
-        {!partnerInfo.hasPartner && !completed && (
+        {!partnerInfo.hasPartner && !completed && timingInfo.status !== 'ended' && (
           <div className="waiting-indicator">
             <span className="pulse-dot" />
             <span className="waiting-text">Waiting for partner</span>

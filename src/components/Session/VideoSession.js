@@ -13,7 +13,11 @@ import {
   FiAlertCircle,
   FiPlay,
   FiPause,
-  FiStopCircle
+  FiStopCircle,
+  FiMaximize,
+  FiMinimize,
+  FiVolume2,
+  FiVolumeX
 } from 'react-icons/fi';
 import toast from 'react-hot-toast';
 
@@ -21,6 +25,15 @@ import toast from 'react-hot-toast';
 const CONNECTION_STATES = {
   LOADING: 'loading',
   ACTIVE: 'active',
+  ENDED: 'ended'
+};
+
+// Timer phases
+const TIMER_PHASES = {
+  READY: 'ready',
+  RUNNING: 'running',
+  WARNING: 'warning', // Last 5 minutes
+  CRITICAL: 'critical', // Last minute
   ENDED: 'ended'
 };
 
@@ -48,13 +61,18 @@ function VideoSession() {
   const [videoReady, setVideoReady] = useState(false);
   const [participantNames, setParticipantNames] = useState([]);
   
-  // IMPROVED: Enhanced timer state
+  // Enhanced timer state
   const [timeLeft, setTimeLeft] = useState(0);
   const [totalTime, setTotalTime] = useState(0);
   const [timerRunning, setTimerRunning] = useState(false);
+  const [timerPhase, setTimerPhase] = useState(TIMER_PHASES.READY);
   const [showEndConfirmation, setShowEndConfirmation] = useState(false);
   const [autoEndWarning, setAutoEndWarning] = useState(false);
-  const [timerPhase, setTimerPhase] = useState('ready'); // 'ready', 'running', 'warning', 'ending'
+  
+  // UI state
+  const [isFullscreen, setIsFullscreen] = useState(false);
+  const [soundEnabled, setSoundEnabled] = useState(true);
+  const [lastNotification, setLastNotification] = useState(0);
 
   // Cleanup on unmount
   useEffect(() => {
@@ -136,7 +154,7 @@ function VideoSession() {
         setParticipantCount(initialCount);
         setParticipantNames(names);
         
-        // IMPROVED: Initialize timer with session timing
+        // Initialize timer with session timing
         const duration = sessionData.duration || 50;
         const totalSeconds = duration * 60;
         
@@ -152,7 +170,7 @@ function VideoSession() {
           
           if (adjustedTimeLeft > 0) {
             setTimerRunning(true);
-            setTimerPhase('running');
+            setTimerPhase(TIMER_PHASES.RUNNING);
             toast.success('🎯 Joined session in progress!');
           } else {
             // Session should have ended
@@ -164,7 +182,7 @@ function VideoSession() {
           // Session hasn't started yet, wait or start immediately
           setTimeLeft(totalSeconds);
           setTimerRunning(true);
-          setTimerPhase('running');
+          setTimerPhase(TIMER_PHASES.RUNNING);
           toast.success('🎯 Focus session started!');
         }
         
@@ -194,7 +212,7 @@ function VideoSession() {
     initSession();
   }, [sessionId, user?.uid, navigate]);
 
-  // IMPROVED: Timer effect with enhanced controls
+  // Enhanced timer effect with better phase management
   useEffect(() => {
     const handleTimerComplete = async () => {
       if (!mountedRef.current) return;
@@ -215,6 +233,8 @@ function VideoSession() {
           });
         }
 
+        setTimerPhase(TIMER_PHASES.ENDED);
+
         // Auto-redirect after 3 seconds
         autoEndTimeoutRef.current = setTimeout(() => {
           if (mountedRef.current) {
@@ -231,47 +251,82 @@ function VideoSession() {
       }
     };
 
+    const playNotificationSound = (type = 'info') => {
+      if (!soundEnabled) return;
+      
+      try {
+        const audioContext = new (window.AudioContext || window.webkitAudioContext)();
+        const oscillator = audioContext.createOscillator();
+        const gainNode = audioContext.createGain();
+        
+        oscillator.connect(gainNode);
+        gainNode.connect(audioContext.destination);
+        
+        const frequencies = {
+          info: 440,
+          warning: 523,
+          critical: 659
+        };
+        
+        oscillator.frequency.setValueAtTime(frequencies[type] || 440, audioContext.currentTime);
+        oscillator.type = 'sine';
+        
+        gainNode.gain.setValueAtTime(0.1, audioContext.currentTime);
+        gainNode.gain.exponentialRampToValueAtTime(0.01, audioContext.currentTime + 0.3);
+        
+        oscillator.start(audioContext.currentTime);
+        oscillator.stop(audioContext.currentTime + 0.3);
+        
+      } catch (error) {
+        console.log('Audio notification failed:', error);
+      }
+    };
+
     if (timerRunning && timeLeft > 0) {
       timerIntervalRef.current = setInterval(() => {
         setTimeLeft(prev => {
           const newTime = prev - 1;
           
           // Update timer phase based on remaining time
-          if (newTime <= 300 && newTime > 60) { // Last 5 minutes
-            setTimerPhase('warning');
+          if (newTime <= 60 && newTime > 0) { // Last minute
+            setTimerPhase(TIMER_PHASES.CRITICAL);
             
-            // Show warning at 5 minutes
-            if (newTime === 300) {
+            // Critical countdown notifications
+            if (newTime === 60 && lastNotification !== 60) {
+              setLastNotification(60);
+              playNotificationSound('critical');
+              toast('🚨 Final minute! Session ending soon.', {
+                duration: 3000,
+                icon: '⏰'
+              });
+            }
+            
+            // Final 10 seconds countdown
+            if (newTime <= 10 && newTime > 0 && lastNotification !== newTime) {
+              setLastNotification(newTime);
+              playNotificationSound('critical');
+              toast(`${newTime}`, {
+                duration: 1000,
+                icon: '🔥'
+              });
+            }
+          } else if (newTime <= 300 && newTime > 60) { // Last 5 minutes
+            if (timerPhase !== TIMER_PHASES.WARNING) {
+              setTimerPhase(TIMER_PHASES.WARNING);
               setAutoEndWarning(true);
+              playNotificationSound('warning');
               toast('⏰ 5 minutes remaining! Session will end automatically.', {
                 duration: 5000,
                 icon: '⚠️'
               });
             }
-          } else if (newTime <= 60) { // Last minute
-            setTimerPhase('ending');
-            
-            // Show final warning at 1 minute
-            if (newTime === 60) {
-              toast('🚨 Final minute! Session ending soon.', {
-                duration: 3000,
-                icon: '🔔'
-              });
-            }
-            
-            // Countdown notifications in last 10 seconds
-            if (newTime <= 10 && newTime > 0) {
-              toast(`${newTime}`, {
-                duration: 1000,
-                icon: '⏰'
-              });
-            }
+          } else if (newTime > 300) {
+            setTimerPhase(TIMER_PHASES.RUNNING);
           }
           
           // Auto-end session when timer reaches 0
           if (newTime <= 0) {
             setTimerRunning(false);
-            setTimerPhase('ended');
             handleTimerComplete();
             return 0;
           }
@@ -291,7 +346,7 @@ function VideoSession() {
         clearInterval(timerIntervalRef.current);
       }
     };
-  }, [timerRunning, timeLeft, sessionId, session?.status, session?.duration, navigate]);
+  }, [timerRunning, timeLeft, sessionId, session?.status, session?.duration, navigate, soundEnabled, lastNotification, timerPhase]);
 
   // Format time display
   const formatTime = useCallback((seconds) => {
@@ -309,9 +364,9 @@ function VideoSession() {
   // Get timer color based on phase
   const getTimerColor = useCallback(() => {
     switch (timerPhase) {
-      case 'warning': return '#f59e0b';
-      case 'ending': return '#ef4444';
-      case 'ended': return '#6b7280';
+      case TIMER_PHASES.WARNING: return '#f59e0b';
+      case TIMER_PHASES.CRITICAL: return '#ef4444';
+      case TIMER_PHASES.ENDED: return '#6b7280';
       default: return '#10b981';
     }
   }, [timerPhase]);
@@ -553,15 +608,33 @@ function VideoSession() {
 
   // Toggle timer
   const toggleTimer = useCallback(() => {
-    if (timerPhase === 'ended') return;
+    if (timerPhase === TIMER_PHASES.ENDED) return;
     
     setTimerRunning(!timerRunning);
-    setTimerPhase(timerRunning ? 'paused' : 'running');
     
     toast(timerRunning ? 'Timer paused' : 'Timer resumed', {
       icon: timerRunning ? '⏸️' : '▶️'
     });
   }, [timerRunning, timerPhase]);
+
+  // Toggle sound
+  const toggleSound = useCallback(() => {
+    setSoundEnabled(!soundEnabled);
+    toast(soundEnabled ? 'Sound disabled' : 'Sound enabled', {
+      icon: soundEnabled ? '🔇' : '🔊'
+    });
+  }, [soundEnabled]);
+
+  // Toggle fullscreen
+  const toggleFullscreen = useCallback(() => {
+    if (!document.fullscreenElement) {
+      document.documentElement.requestFullscreen();
+      setIsFullscreen(true);
+    } else {
+      document.exitFullscreen();
+      setIsFullscreen(false);
+    }
+  }, []);
 
   // Loading state
   if (connectionState === CONNECTION_STATES.LOADING) {
@@ -608,7 +681,7 @@ function VideoSession() {
   }
 
   // Session ended state
-  if (connectionState === CONNECTION_STATES.ENDED || timerPhase === 'ended') {
+  if (connectionState === CONNECTION_STATES.ENDED || timerPhase === TIMER_PHASES.ENDED) {
     return (
       <div className="video-session-ended">
         <div className="ended-container">
@@ -634,7 +707,7 @@ function VideoSession() {
   // Main session view
   return (
     <div className={`video-session ${isMobile ? 'mobile' : isTablet ? 'tablet' : 'desktop'}`}>
-      {/* Header with integrated timer */}
+      {/* Enhanced Header with timer */}
       <div className="video-header">
         <div className="session-info">
           <h3 className="session-title">{session?.goal || 'Focus Session'}</h3>
@@ -678,6 +751,25 @@ function VideoSession() {
             </button>
           </div>
 
+          {/* Additional controls */}
+          <button 
+            className="control-btn"
+            onClick={toggleSound}
+            title={soundEnabled ? 'Disable sound' : 'Enable sound'}
+          >
+            {soundEnabled ? <FiVolume2 size={16} /> : <FiVolumeX size={16} />}
+          </button>
+
+          {!isMobile && (
+            <button 
+              className="control-btn"
+              onClick={toggleFullscreen}
+              title={isFullscreen ? 'Exit fullscreen' : 'Enter fullscreen'}
+            >
+              {isFullscreen ? <FiMinimize size={16} /> : <FiMaximize size={16} />}
+            </button>
+          )}
+
           {/* End session button */}
           <button 
             onClick={() => setShowEndConfirmation(true)}
@@ -715,8 +807,8 @@ function VideoSession() {
                   <div className="detail">
                     <strong>Phase:</strong>
                     <span style={{ color: getTimerColor() }}>
-                      {timerPhase === 'warning' ? 'Final stretch!' : 
-                       timerPhase === 'ending' ? 'Almost done!' : 
+                      {timerPhase === TIMER_PHASES.WARNING ? 'Final stretch!' : 
+                       timerPhase === TIMER_PHASES.CRITICAL ? 'Almost done!' : 
                        'Deep focus'}
                     </span>
                   </div>
@@ -734,17 +826,17 @@ function VideoSession() {
         </div>
       </div>
 
-      {/* Bottom status bar */}
+      {/* Enhanced bottom status bar */}
       <div className="bottom-status">
         <div className="status-indicator">
           <div className="status-icon">
-            {timerPhase === 'warning' ? '⚠️' : 
-             timerPhase === 'ending' ? '🚨' : '💡'}
+            {timerPhase === TIMER_PHASES.WARNING ? '⚠️' : 
+             timerPhase === TIMER_PHASES.CRITICAL ? '🚨' : '💡'}
           </div>
           <div className="status-text">
             <strong>
-              {timerPhase === 'warning' ? 'Final 5 minutes!' : 
-               timerPhase === 'ending' ? 'Last minute!' : 
+              {timerPhase === TIMER_PHASES.WARNING ? 'Final 5 minutes!' : 
+               timerPhase === TIMER_PHASES.CRITICAL ? 'Last minute!' : 
                'Focus Mode Active'}
             </strong>
           </div>
