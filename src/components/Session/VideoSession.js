@@ -212,7 +212,7 @@ function VideoSession() {
     initSession();
   }, [sessionId, user?.uid, navigate]);
 
-  // Enhanced timer effect with better phase management
+  // Timer logic with auto-end
   useEffect(() => {
     const handleTimerComplete = async () => {
       if (!mountedRef.current) return;
@@ -220,6 +220,9 @@ function VideoSession() {
       console.log('⏰ Timer completed - auto-ending session');
       
       try {
+        setTimerRunning(false);
+        setTimerPhase(TIMER_PHASES.ENDED);
+        
         // Show completion celebration
         toast.success('🎉 Focus session completed! Excellent work!', { duration: 5000 });
         
@@ -233,8 +236,6 @@ function VideoSession() {
           });
         }
 
-        setTimerPhase(TIMER_PHASES.ENDED);
-
         // Auto-redirect after 3 seconds
         autoEndTimeoutRef.current = setTimeout(() => {
           if (mountedRef.current) {
@@ -246,7 +247,9 @@ function VideoSession() {
         console.error('Error completing session:', error);
         // Still redirect even if update fails
         setTimeout(() => {
-          navigate('/dashboard');
+          if (mountedRef.current) {
+            navigate('/dashboard');
+          }
         }, 2000);
       }
     };
@@ -326,7 +329,6 @@ function VideoSession() {
           
           // Auto-end session when timer reaches 0
           if (newTime <= 0) {
-            setTimerRunning(false);
             handleTimerComplete();
             return 0;
           }
@@ -428,7 +430,11 @@ function VideoSession() {
         return;
       }
 
-      const roomName = `focusmate-${sessionId}`.replace(/[^a-zA-Z0-9-]/g, '');
+      // Create unique room name to prevent duplicates
+      const roomName = `focusmate-${sessionId}-${user.uid.slice(-6)}`.replace(/[^a-zA-Z0-9-]/g, '');
+      
+      // Generate unique display name to prevent duplicates
+      const uniqueDisplayName = `${user?.displayName || user?.email?.split('@')[0] || 'Student'}-${Date.now().toString().slice(-4)}`;
       
       const options = {
         roomName,
@@ -436,15 +442,15 @@ function VideoSession() {
         height: '100%',
         parentNode: jitsiContainerRef.current,
         userInfo: {
-          displayName: user?.displayName || user?.email?.split('@')[0] || 'Student',
+          displayName: uniqueDisplayName,
           email: user?.email
         },
         configOverwrite: {
           prejoinPageEnabled: false,
-          startWithAudioMuted: true,
-          startWithVideoMuted: true,
+          startWithAudioMuted: false,
+          startWithVideoMuted: false,
           enableClosePage: false,
-          disableInviteFunctions: false,
+          disableInviteFunctions: true,
           enableWelcomePage: false,
           requireDisplayName: true,
           defaultLanguage: 'en',
@@ -462,7 +468,37 @@ function VideoSession() {
           enableNoAudioDetection: true,
           enableOpusRed: true,
           enableSaveLogs: false,
-          enableUserRolesBasedOnToken: false
+          enableUserRolesBasedOnToken: false,
+          resolution: 720,
+          channelLastN: 2, // Limit to 2 participants max
+          startAudioOnly: false,
+          startScreenSharing: false,
+          enableLayerSuspension: true,
+          disableAudioLevels: false,
+          constraints: {
+            video: {
+              aspectRatio: 16 / 9,
+              height: {
+                ideal: 720,
+                max: 1080,
+                min: 240
+              },
+              width: {
+                ideal: 1280,
+                max: 1920,
+                min: 320
+              },
+              frameRate: {
+                ideal: 30,
+                max: 30
+              }
+            },
+            audio: {
+              echoCancellation: true,
+              noiseSuppression: true,
+              autoGainControl: true
+            }
+          }
         },
         interfaceConfigOverwrite: {
           MOBILE_APP_PROMO: false,
@@ -472,18 +508,21 @@ function VideoSession() {
           ENABLE_MOBILE_BROWSER: true,
           HIDE_DEEP_LINKING_LOGO: true,
           TOOLBAR_ALWAYS_VISIBLE: true,
-          DISABLE_INVITE_FUNCTIONS: false,
+          DISABLE_INVITE_FUNCTIONS: true,
           DISABLE_DEEP_LINKING: true,
           DISABLE_JOIN_LEAVE_NOTIFICATIONS: false,
-          HIDE_INVITE_MORE_HEADER: false,
+          HIDE_INVITE_MORE_HEADER: true,
           SHOW_CHROME_EXTENSION_BANNER: false,
           VERTICAL_FILMSTRIP: false,
           TILE_VIEW_MAX_COLUMNS: 2,
+          TOOLBAR_TIMEOUT: 4000,
+          INITIAL_TOOLBAR_TIMEOUT: 20000,
           TOOLBAR_BUTTONS: isMobile ? [
             'microphone', 
             'camera', 
-            'closedcaptions',
             'desktop',
+            'fullscreen',
+            'fodeviceselection',
             'chat',
             'participants-pane',
             'tileview',
@@ -491,12 +530,10 @@ function VideoSession() {
           ] : [
             'microphone', 
             'camera', 
-            'closedcaptions',
             'desktop',
             'fullscreen',
             'fodeviceselection',
             'hangup',
-            'profile',
             'chat',
             'participants-pane',
             'settings',
@@ -504,7 +541,8 @@ function VideoSession() {
             'videoquality',
             'filmstrip',
             'tileview',
-            'videobackgroundblur'
+            'videobackgroundblur',
+            'closedcaptions'
           ],
           CHAT_ENABLED: true,
           DISPLAY_WELCOME_PAGE_CONTENT: false,
@@ -512,9 +550,22 @@ function VideoSession() {
           HIDE_PARTICIPANTS_STATS: false,
           DEFAULT_BACKGROUND: '#1e1b4b',
           OPTIMAL_BROWSERS: ['chrome', 'chromium', 'firefox', 'safari', 'webkit'],
-          UNSUPPORTED_BROWSERS: []
+          UNSUPPORTED_BROWSERS: [],
+          // Ensure proper mobile experience
+          MOBILE_DYNAMIC_TOOLBAR_COLOR: true,
+          APP_NAME: 'FocusMate India'
         }
       };
+
+      // Dispose any existing instance first
+      if (apiRef.current) {
+        try {
+          apiRef.current.dispose();
+        } catch (e) {
+          console.log('Previous instance cleanup:', e);
+        }
+        apiRef.current = null;
+      }
 
       apiRef.current = new window.JitsiMeetExternalAPI('meet.jit.si', options);
       
@@ -727,9 +778,9 @@ function VideoSession() {
         </div>
         
         <div className="header-actions">
-          {/* Enhanced inline timer */}
+          {/* Simple inline timer */}
           <div 
-            className={`header-timer ${timerPhase}`}
+            className={`header-timer ${timerPhase.toLowerCase()}`}
             style={{ 
               '--progress': `${progress}%`,
               borderColor: getTimerColor(),
@@ -781,7 +832,7 @@ function VideoSession() {
         </div>
       </div>
 
-      {/* Full screen video */}
+      {/* Full screen video with proper scrolling */}
       <div className="video-content">
         <div className="video-container">
           <div ref={jitsiContainerRef} className="jitsi-container">
@@ -827,35 +878,7 @@ function VideoSession() {
       </div>
 
       {/* Enhanced bottom status bar */}
-      <div className="bottom-status">
-        <div className="status-indicator">
-          <div className="status-icon">
-            {timerPhase === TIMER_PHASES.WARNING ? '⚠️' : 
-             timerPhase === TIMER_PHASES.CRITICAL ? '🚨' : '💡'}
-          </div>
-          <div className="status-text">
-            <strong>
-              {timerPhase === TIMER_PHASES.WARNING ? 'Final 5 minutes!' : 
-               timerPhase === TIMER_PHASES.CRITICAL ? 'Last minute!' : 
-               'Focus Mode Active'}
-            </strong>
-          </div>
-        </div>
-        
-        {participantCount > 1 ? (
-          <div className="partner-status">
-            <div className="partner-avatar">
-              {participantNames[1]?.charAt(0).toUpperCase() || 'P'}
-            </div>
-            <span>With {participantNames[1] || 'Partner'}</span>
-          </div>
-        ) : (
-          <div className="partner-status">
-            <div className="partner-avatar">⏳</div>
-            <span>Solo session</span>
-          </div>
-        )}
-      </div>
+      
 
       {/* Auto-end warning */}
       {autoEndWarning && (

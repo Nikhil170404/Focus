@@ -946,61 +946,6 @@ body {
   background: rgba(239, 68, 68, 0.2);
 }
 
-/* Bottom Navigation */
-.bottom-nav {
-  position: fixed;
-  bottom: 0;
-  left: 0;
-  right: 0;
-  z-index: var(--z-fixed);
-  background: var(--dark-glass-bg);
-  backdrop-filter: var(--glass-blur);
-  -webkit-backdrop-filter: var(--glass-blur);
-  border-top: 1px solid var(--dark-glass-border);
-  padding: var(--space-2);
-  padding-bottom: calc(var(--space-2) + env(safe-area-inset-bottom));
-  display: grid;
-  grid-template-columns: repeat(4, 1fr);
-  gap: var(--space-1);
-}
-
-.bottom-nav-item {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: var(--space-1);
-  padding: var(--space-2);
-  text-decoration: none;
-  color: rgba(255, 255, 255, 0.6);
-  font-size: 0.75rem;
-  font-weight: 500;
-  border-radius: var(--radius-md);
-  transition: all var(--transition-base);
-  position: relative;
-  min-height: 60px;
-  justify-content: center;
-}
-
-.bottom-nav-item.active {
-  color: var(--primary-400);
-  background: rgba(99, 102, 241, 0.1);
-}
-
-.bottom-nav-label {
-  font-size: 0.625rem;
-  line-height: 1;
-}
-
-.bottom-active-indicator {
-  position: absolute;
-  top: 2px;
-  left: 50%;
-  transform: translateX(-50%);
-  width: 16px;
-  height: 2px;
-  background: var(--primary-400);
-  border-radius: 1px;
-}
 
 /* ====================================
    DASHBOARD COMPONENTS
